@@ -12,14 +12,20 @@ Basic usage:
 
     import PrettyExpressive as P
 
+    -- Create a CostFactory, for measuring optimality ("prettiness")
     cf : P.CostFactory P.DefaultCostTuple
     cf =
         P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
 
-    example : Maybe String
-    example =
-        P.prettyFormat cf
+    -- Create the document (sequences of pretty-printing directives)
+    document : P.Doc
+    document =
             (P.text "hello" |> P.concat (P.text " world"))
+
+    -- Render the document to a String
+    printed : Maybe String
+    printed =
+        P.prettyFormat cf document
 
 **Gren-specific design note:** The OCaml original used per-node mutable hash
 tables (indexed by `(column, indent)` pairs) to memoize intermediate results,
