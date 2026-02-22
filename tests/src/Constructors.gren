@@ -1,0 +1,1004 @@
+module Constructors exposing (..)
+
+import Expect exposing (Expectation)
+import Test exposing (..)
+
+import PrettyExpressive as P
+
+suite : Test
+suite =
+    let
+        cf80 : P.CostFactory P.DefaultCostTuple
+        cf80 =
+            P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+        cf20 : P.CostFactory P.DefaultCostTuple
+        cf20 =
+            P.defaultCostFactory { pageWidth = 20, computationWidth = Nothing }
+    in
+        describe "Test all the Doc constructors"
+            [ describe "Basics"
+
+                [ test "Test empty" <|
+                    \_ ->
+                        let
+                            d = P.empty
+
+                            expected = ""
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.fail "document failed to print"
+                                Just actual ->
+                                    Expect.equal expected actual
+
+                , test "Test text" <|
+                    \_ ->
+                        let
+                            d = P.text "foo"
+
+                            expected = "foo"
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.fail "document failed to print"
+                                Just actual ->
+                                    Expect.equal expected actual
+
+                , test "Test fail" <|
+                    \_ ->
+                        let
+                            d = P.failDoc
+
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.pass
+                                Just _ ->
+                                    Expect.fail "document failed to fail"
+
+                , test "Test one nl" <|
+                    \_ ->
+                        let
+                            d = P.nl
+
+                            expected = "\n"
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.fail "document failed to print"
+                                Just actual ->
+                                    Expect.equal expected actual
+
+                , test "Test two nl's" <|
+                    \_ ->
+                        let
+                            d = P.concat P.nl P.nl
+
+                            expected = "\n\n"
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.fail "document failed to print"
+                                Just actual ->
+                                    Expect.equal expected actual
+
+                , test "Test breakDoc at 80 columns" <|
+                    \_ ->
+                        let
+                            d = P.group
+                                    (P.concat_array
+                                        [ P.text "Break =>"
+                                        , P.breakDoc
+                                        , P.text "<= here when the next line is long"
+                                        ]
+                                    )
+
+
+                            -- No line break because we allow 80 columns
+                            expected = "Break =><= here when the next line is long"
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.fail "document failed to print"
+                                Just actual ->
+                                    Expect.equal expected actual
+
+                , test "Test breakDoc at 20 columns" <|
+                    \_ ->
+                        let
+                            d = P.group
+                                    (P.concat_array
+                                        [ P.text "Break =>"
+                                        , P.breakDoc
+                                        , P.text "<= here when the next line is long"
+                                        ]
+                                    )
+
+
+                            -- Line break because we allow 20 columns
+                            expected = "Break =>\n<= here when the next line is long"
+                            maybeActual = P.prettyFormat cf20 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.fail "document failed to print"
+                                Just actual ->
+                                    Expect.equal expected actual
+
+                , test "Test hardNl at 80 columns" <|
+                    \_ ->
+                        let
+                            d = P.group
+                                    (P.concat_array
+                                        [ P.text "Break =>"
+                                        , P.hardNl
+                                        , P.text "<= here when the next line is long"
+                                        ]
+                                    )
+
+
+                            -- hardNl always produces a line break
+                            expected = "Break =>\n<= here when the next line is long"
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.fail "document failed to print"
+                                Just actual ->
+                                    Expect.equal expected actual
+
+                , test "Test hardNl at 20 columns" <|
+                    \_ ->
+                        let
+                            d = P.group
+                                    (P.concat_array
+                                        [ P.text "Break =>"
+                                        , P.hardNl
+                                        , P.text "<= here when the next line is long"
+                                        ]
+                                    )
+
+
+                            -- hardNl always produces a line break
+                            expected = "Break =>\n<= here when the next line is long"
+                            maybeActual = P.prettyFormat cf20 d
+                        in
+                            when maybeActual is
+                                Nothing ->
+                                    Expect.fail "document failed to print"
+                                Just actual ->
+                                    Expect.equal expected actual
+
+                ]
+
+            -- ============================================================
+            -- newline (general constructor)
+            -- ============================================================
+            -- nl, hardNl, and breakDoc are all just DocNewline with different
+            -- payloads.  Here we test the general `newline` constructor with a
+            -- custom flat-form string to make sure the payload is respected.
+
+            , describe "newline"
+
+                [ test "newline: on its own always produces a real newline (flat-form string is ignored by the resolver)" <|
+                    \_ ->
+                        -- The Maybe String payload is only consulted by flatten.
+                        -- Rendering `newline (Just ", ")` directly gives "\n".
+                        let
+                            d = P.concat (P.text "a") (P.concat (P.newline (Just ", ")) (P.text "b"))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a\nb" actual
+
+                , test "newline: flatten replaces it with the payload string" <|
+                    \_ ->
+                        -- flatten (newline (Just ", ")) == text ", "
+                        let
+                            d = P.concat (P.text "a") (P.concat (P.flatten (P.newline (Just ", "))) (P.text "b"))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a, b" actual
+
+                , test "newline: group picks flat form (custom separator) when it fits" <|
+                    \_ ->
+                        -- group tries the flat form first.  "a, b" = 4 chars,
+                        -- fits in both cf80 and cf20 so the comma-space wins.
+                        let
+                            d = P.group (P.concat (P.text "a") (P.concat (P.newline (Just ", ")) (P.text "b")))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a, b" actual
+
+                , test "newline: group breaks to newline when flat form overflows" <|
+                    \_ ->
+                        -- "a long left side, b long right side" is 35 chars,
+                        -- overflows cf20 so the broken form wins.
+                        let
+                            d = P.group
+                                    (P.concat
+                                        (P.text "a long left side")
+                                        (P.concat
+                                            (P.newline (Just ", "))
+                                            (P.text "b long right side")
+                                        )
+                                    )
+                            maybeActual = P.prettyFormat cf20 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a long left side\nb long right side" actual
+
+                , test "newline Nothing: flatten fails (same as hardNl)" <|
+                    \_ ->
+                        -- newline Nothing has no flat form; flatten turns it into failDoc.
+                        let
+                            d = P.flatten (P.newline Nothing)
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.pass
+                                Just _  -> Expect.fail "expected render to fail after flattening newline Nothing"
+
+                ]
+
+            -- ============================================================
+            -- concat (smart constructor normalisations)
+            -- ============================================================
+            -- The basic concat behaviour is already exercised above.  These
+            -- tests target the specific normalisation rules in the smart
+            -- constructor so we know they fire correctly.
+
+            , describe "concat normalisations"
+
+                [ test "concat: empty on the left is dropped" <|
+                    \_ ->
+                        -- concat empty d  ==  d  (no extra node allocated)
+                        let
+                            d = P.concat P.empty (P.text "hello")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "hello" actual
+
+                , test "concat: empty on the right is dropped" <|
+                    \_ ->
+                        let
+                            d = P.concat (P.text "hello") P.empty
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "hello" actual
+
+                , test "concat: two adjacent text nodes are fused" <|
+                    \_ ->
+                        -- DocText ++ DocText => single DocText at construction time.
+                        let
+                            d = P.concat (P.text "foo") (P.text "bar")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "foobar" actual
+
+                , test "concat: failDoc on the left propagates" <|
+                    \_ ->
+                        let
+                            d = P.concat P.failDoc (P.text "hello")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.pass
+                                Just _  -> Expect.fail "expected render to fail"
+
+                , test "concat: failDoc on the right propagates" <|
+                    \_ ->
+                        let
+                            d = P.concat (P.text "hello") P.failDoc
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.pass
+                                Just _  -> Expect.fail "expected render to fail"
+
+                ]
+
+            -- ============================================================
+            -- choice
+            -- ============================================================
+
+            , describe "choice"
+
+                [ test "choice: failDoc on the left is dropped" <|
+                    \_ ->
+                        -- choice failDoc d  ==  d  (smart constructor fires)
+                        let
+                            d = P.choice P.failDoc (P.text "hello")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "hello" actual
+
+                , test "choice: failDoc on the right is dropped" <|
+                    \_ ->
+                        let
+                            d = P.choice (P.text "hello") P.failDoc
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "hello" actual
+
+                , test "choice: both fail means the result fails" <|
+                    \_ ->
+                        let
+                            d = P.choice P.failDoc P.failDoc
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.pass
+                                Just _  -> Expect.fail "expected render to fail"
+
+                , test "choice: wide page picks the single-line option" <|
+                    \_ ->
+                        -- "hello world" (11 chars) fits in 80 columns and has
+                        -- zero badness, so it dominates the two-line alternative.
+                        let
+                            oneLine  = P.text "hello world"
+                            twoLines = P.concat (P.text "hello") (P.concat P.nl (P.text "world"))
+                            d = P.choice oneLine twoLines
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "hello world" actual
+
+                , test "choice: narrow page picks the multi-line option" <|
+                    \_ ->
+                        -- "hello world" overflows cf20 (11 > 20? no --- it fits!
+                        -- We need something longer).
+                        -- "this overflows the narrow limit" = 31 chars, overflows cf20.
+                        let
+                            oneLine  = P.text "this overflows the narrow limit"
+                            twoLines = P.concat (P.text "short line") (P.concat P.nl (P.text "also short"))
+                            d = P.choice oneLine twoLines
+                            maybeActual = P.prettyFormat cf20 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "short line\nalso short" actual
+
+                ]
+
+            -- ============================================================
+            -- nest
+            -- ============================================================
+
+            , describe "nest"
+
+                [ test "nest: indents newlines by n spaces" <|
+                    \_ ->
+                        -- The newline inside lands at indentation level 4.
+                        let
+                            d = P.nest 4
+                                    (P.concat (P.text "if true:")
+                                        (P.concat P.nl (P.text "body"))
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "if true:\n    body" actual
+
+                , test "nest: multiple newlines all indent at the same level" <|
+                    \_ ->
+                        let
+                            d = P.nest 2
+                                    (P.concat_array [ P.text "a", P.nl, P.text "b", P.nl, P.text "c" ])
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a\n  b\n  c" actual
+
+                , test "nest: two nests accumulate" <|
+                    \_ ->
+                        -- nest 2 (nest 3 ...) adds up to 5 spaces of indentation.
+                        let
+                            d = P.nest 2
+                                    (P.nest 3
+                                        (P.concat (P.text "x") (P.concat P.nl (P.text "y")))
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "x\n     y" actual
+
+                , test "nest: does not insert spaces before the first text" <|
+                    \_ ->
+                        -- nest only affects newlines; text at the start is unaffected.
+                        let
+                            d = P.nest 10 (P.text "hello")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "hello" actual
+
+                , test "nest: does not override align" <|
+                    \_ ->
+                        -- An align inside a nest pins indentation to the current
+                        -- column; the outer nest cannot increase it further.
+                        -- "prefix: " is 8 chars wide so align sets i=8,
+                        -- overriding the nest 20.
+                        let
+                            d = P.nest 20
+                                    (P.concat (P.text "prefix: ")
+                                        (P.align
+                                            (P.concat (P.text "first") (P.concat P.nl (P.text "second")))
+                                        )
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "prefix: first\n        second" actual
+
+                ]
+
+            -- ============================================================
+            -- align
+            -- ============================================================
+
+            , describe "align"
+
+                [ test "align: pins indentation to the current column" <|
+                    \_ ->
+                        -- "foo: " ends at column 5, so align sets i=5.
+                        -- The newline inside then indents to column 5.
+                        let
+                            d = P.concat (P.text "foo: ")
+                                    (P.align
+                                        (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "foo: a\n     b" actual
+
+                , test "align: overrides an enclosing nest" <|
+                    \_ ->
+                        -- nest 10 sets i=10, but the align resets i to the current
+                        -- column (3, the width of "hi "), not 10.
+                        let
+                            d = P.nest 10
+                                    (P.concat (P.text "hi ")
+                                        (P.align
+                                            (P.concat (P.text "one") (P.concat P.nl (P.text "two")))
+                                        )
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "hi one\n   two" actual
+
+                , test "align: at column 0 is a no-op for indentation" <|
+                    \_ ->
+                        -- Starting at column 0, align sets i=0 which is the default.
+                        let
+                            d = P.align (P.concat (P.text "x") (P.concat P.nl (P.text "y")))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "x\ny" actual
+
+                ]
+
+            -- ============================================================
+            -- reset
+            -- ============================================================
+
+            , describe "reset"
+
+                [ test "reset: sets indentation to 0 regardless of enclosing nest" <|
+                    \_ ->
+                        -- nest 4 makes the first newline indent by 4.
+                        -- reset cancels that for the inner doc, so its newline
+                        -- indents to 0.
+                        let
+                            d = P.nest 4
+                                    (P.concat (P.text "outer")
+                                        (P.concat P.nl
+                                            (P.reset
+                                                (P.concat (P.text "inner") (P.concat P.nl (P.text "also inner")))
+                                            )
+                                        )
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "outer\n    inner\nalso inner" actual
+
+                , test "reset: only applies to its sub-document; indentation resumes after" <|
+                    \_ ->
+                        -- After the reset sub-doc, a following newline still uses
+                        -- the surrounding nest's indentation level.
+                        let
+                            d = P.nest 4
+                                    (P.concat_array
+                                        [ P.text "before"
+                                        , P.nl
+                                        , P.reset (P.text "at zero")
+                                        , P.nl
+                                        , P.text "back to 4"
+                                        ]
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "before\n    at zero\n    back to 4" actual
+
+                , test "reset: cancels an enclosing align" <|
+                    \_ ->
+                        -- "label: " is 7 chars wide; align sets i=7, so the
+                        -- first inner newline indents to column 7.
+                        -- The reset sub-document then overrides i to 0, so the
+                        -- second newline (inside the reset) indents to column 0.
+                        --
+                        --   label: first
+                        --          x
+                        --   y          <- reset cancelled the align here
+                        let
+                            d = P.concat (P.text "label: ")
+                                    (P.align
+                                        (P.concat (P.text "first")
+                                            (P.concat P.nl
+                                                (P.reset
+                                                    (P.concat (P.text "x") (P.concat P.nl (P.text "y")))
+                                                )
+                                            )
+                                        )
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "label: first\n       x\ny" actual
+
+                ]
+
+            -- ============================================================
+            -- addCost
+            -- ============================================================
+
+            , describe "addCost"
+
+                [ test "addCost: adding zero cost does not change the output" <|
+                    \_ ->
+                        let
+                            zeroCost = { badness = 0, columnOverflow = 0, height = 0 }
+                            d = P.addCost zeroCost (P.text "hello")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "hello" actual
+
+                , test "addCost: large penalty steers choice away from penalised branch" <|
+                    \_ ->
+                        -- Without addCost, "short" dominates "longer option"
+                        -- (same zero badness, ends sooner).
+                        -- With a large badness penalty, "longer option" wins instead.
+                        let
+                            bigPenalty = { badness = 9999, columnOverflow = 0, height = 0 }
+                            d = P.choice
+                                    (P.addCost bigPenalty (P.text "short"))
+                                    (P.text "longer option")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "longer option" actual
+
+                , test "addCost: without penalty the shorter option wins" <|
+                    \_ ->
+                        -- Confirm baseline: no cost manipulation means "short" wins.
+                        let
+                            d = P.choice (P.text "short") (P.text "longer option")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "short" actual
+
+                , test "addCost: on failDoc still produces failDoc" <|
+                    \_ ->
+                        let
+                            zeroCost = { badness = 0, columnOverflow = 0, height = 0 }
+                            d = P.addCost zeroCost P.failDoc
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.pass
+                                Just _  -> Expect.fail "expected render to fail"
+
+                ]
+
+            -- ============================================================
+            -- group and flatten
+            -- ============================================================
+
+            , describe "group and flatten"
+
+                [ test "group: wide page uses the flat form" <|
+                    \_ ->
+                        -- "foo bar" = 7 chars, fits in 80 columns.
+                        let
+                            d = P.group (P.concat (P.text "foo") (P.concat P.nl (P.text "bar")))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "foo bar" actual
+
+                , test "group: narrow page uses the broken form" <|
+                    \_ ->
+                        -- "longer text here and more text" overflows cf20.
+                        let
+                            d = P.group
+                                    (P.concat (P.text "longer text here") (P.concat P.nl (P.text "and more text")))
+                            maybeActual = P.prettyFormat cf20 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "longer text here\nand more text" actual
+
+                , test "group: hardNl makes only the broken form available" <|
+                    \_ ->
+                        -- flatten hardNl = failDoc, so group drops the flat branch.
+                        -- The broken form is the only option regardless of page width.
+                        let
+                            d = P.group (P.concat (P.text "a") (P.concat P.hardNl (P.text "b")))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a\nb" actual
+
+                , test "flatten: nl becomes a space" <|
+                    \_ ->
+                        let
+                            d = P.flatten (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a b" actual
+
+                , test "flatten: breakDoc becomes an empty string (tokens touch)" <|
+                    \_ ->
+                        let
+                            d = P.flatten (P.concat (P.text "a") (P.concat P.breakDoc (P.text "b")))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "ab" actual
+
+                , test "flatten: hardNl produces failDoc" <|
+                    \_ ->
+                        let
+                            d = P.flatten (P.concat (P.text "a") (P.concat P.hardNl (P.text "b")))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.pass
+                                Just _  -> Expect.fail "expected render to fail after flattening hardNl"
+
+                , test "flatten: drops nest wrappers (indentation irrelevant in flat doc)" <|
+                    \_ ->
+                        -- flatten removes nest but replaces nl with a space,
+                        -- so the result is "x y" not "x\n  y".
+                        let
+                            d = P.flatten
+                                    (P.nest 2
+                                        (P.concat (P.text "x") (P.concat P.nl (P.text "y")))
+                                    )
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "x y" actual
+
+                ]
+
+            -- ============================================================
+            -- twoColumns
+            -- ============================================================
+
+            , describe "twoColumns"
+
+                [ test "twoColumns: empty array renders as empty" <|
+                    \_ ->
+                        let
+                            maybeActual = P.prettyFormat cf80 (P.twoColumns [])
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "" actual
+
+                , test "twoColumns: single pair is just aligned concat" <|
+                    \_ ->
+                        -- One row does not trigger the separator search; it
+                        -- degenerates to align (concat a b).
+                        let
+                            d = P.twoColumns [ { a = P.text "key", b = P.text " = value" } ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "key = value" actual
+
+                , test "twoColumns: right column aligns to the widest left cell" <|
+                    \_ ->
+                        -- Left cells are "a" (1 char) and "bb" (2 chars).
+                        -- Separator at column 2 costs nothing; separator at 1
+                        -- would overflow "bb" and incur twoColumnsOverflow.
+                        -- So separator = 2 wins:
+                        --   row 1: "a" + 1 space padding + "111" = "a 111"
+                        --   row 2: "bb" + 0 padding      + "222" = "bb222"
+                        let
+                            d = P.twoColumns
+                                    [ { a = P.text "a",  b = P.text "111" }
+                                    , { a = P.text "bb", b = P.text "222" }
+                                    ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a 111\nbb222" actual
+
+                , test "twoColumns: three rows all pad to the widest left cell" <|
+                    \_ ->
+                        -- Left cells: "name"(4), "age"(3), "city"(4).
+                        -- Separator must be at least 4 to avoid overflowing
+                        -- "name" and "city".
+                        --   "name" + 0 pad + ": Alice" = "name: Alice"
+                        --   "age"  + 1 pad + ": 30"   = "age : 30"
+                        --   "city" + 0 pad + ": NYC"  = "city: NYC"
+                        let
+                            d = P.twoColumns
+                                    [ { a = P.text "name", b = P.text ": Alice" }
+                                    , { a = P.text "age",  b = P.text ": 30" }
+                                    , { a = P.text "city", b = P.text ": NYC" }
+                                    ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "name: Alice\nage : 30\ncity: NYC" actual
+
+                , test "twoColumns: a failDoc in any cell makes the whole doc fail" <|
+                    \_ ->
+                        let
+                            d = P.twoColumns
+                                    [ { a = P.text "ok",   b = P.text "fine" }
+                                    , { a = P.failDoc,     b = P.text "bad"  }
+                                    ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.pass
+                                Just _  -> Expect.fail "expected render to fail"
+
+                ]
+
+            -- ============================================================
+            -- Derived combinators
+            -- ============================================================
+
+            , describe "hardNlConcat"
+
+                [ test "hardNlConcat: inserts a mandatory newline between two docs" <|
+                    \_ ->
+                        let
+                            d = P.hardNlConcat (P.text "line1") (P.text "line2")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "line1\nline2" actual
+
+                , test "hardNlConcat: newline is never suppressed even on wide page" <|
+                    \_ ->
+                        let
+                            d = P.hardNlConcat (P.text "a") (P.text "b")
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a\nb" actual
+
+                ]
+
+            , describe "alignedConcat"
+
+                [ test "alignedConcat: second doc indents to where first doc ends" <|
+                    \_ ->
+                        -- "foo: " is 5 chars wide.  align sets i=5 for the second doc.
+                        let
+                            d = P.alignedConcat
+                                    (P.text "foo: ")
+                                    (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "foo: a\n     b" actual
+
+                ]
+
+            , describe "flattenAlignedConcat"
+
+                [ test "flattenAlignedConcat: left is flattened; right aligns to its end" <|
+                    \_ ->
+                        -- The left operand contains an nl but it is flattened to a
+                        -- space first.  "a b" is 3 chars wide so the right doc's
+                        -- newline indents 3 spaces.
+                        let
+                            left  = P.concat (P.text "a") (P.concat P.nl (P.text "b"))
+                            right = P.concat (P.text "c") (P.concat P.nl (P.text "d"))
+                            d = P.flattenAlignedConcat left right
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a bc\n   d" actual
+
+                , test "flattenAlignedConcat: fails when left cannot be flattened" <|
+                    \_ ->
+                        -- left contains hardNl; flatten turns it into failDoc.
+                        let
+                            left  = P.concat (P.text "a") (P.concat P.hardNl (P.text "b"))
+                            right = P.text "c"
+                            d = P.flattenAlignedConcat left right
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.pass
+                                Just _  -> Expect.fail "expected render to fail"
+
+                ]
+
+            , describe "vcat"
+
+                [ test "vcat: stacks docs with hard newlines" <|
+                    \_ ->
+                        let
+                            d = P.vcat [ P.text "a", P.text "b", P.text "c" ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "a\nb\nc" actual
+
+                , test "vcat: empty array renders as empty" <|
+                    \_ ->
+                        let
+                            maybeActual = P.prettyFormat cf80 (P.vcat [])
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "" actual
+
+                , test "vcat: newlines are hard (not suppressed by wide page)" <|
+                    \_ ->
+                        -- Even with cf80, vcat never flattens its separators.
+                        let
+                            d = P.vcat [ P.text "one", P.text "two" ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "one\ntwo" actual
+
+                ]
+
+            , describe "hcat"
+
+                [ test "hcat: places docs side by side" <|
+                    \_ ->
+                        let
+                            d = P.hcat [ P.text "a", P.text "b", P.text "c" ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "abc" actual
+
+                , test "hcat: multi-line right doc aligns to where the left doc ends" <|
+                    \_ ->
+                        -- hcat ["foo", (concat "bar" nl "baz")]
+                        -- = flattenAlignedConcat (text "foo") (concat "bar" nl "baz")
+                        -- flatten "foo" = "foo" (3 wide); align sets i=3.
+                        -- newline inside the right doc indents to 3 spaces.
+                        let
+                            d = P.hcat
+                                    [ P.text "foo"
+                                    , P.concat (P.text "bar") (P.concat P.nl (P.text "baz"))
+                                    ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "foobar\n   baz" actual
+
+                , test "hcat: empty array renders as empty" <|
+                    \_ ->
+                        let
+                            maybeActual = P.prettyFormat cf80 (P.hcat [])
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "" actual
+
+                ]
+
+            , describe "foldDoc"
+
+                [ test "foldDoc: left-associative fold" <|
+                    \_ ->
+                        -- foldDoc f [a, b, c] = f (f a b) c
+                        -- Using hardNlConcat as f makes the order visible.
+                        let
+                            d = P.foldDoc P.hardNlConcat
+                                    [ P.text "first", P.text "second", P.text "third" ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "first\nsecond\nthird" actual
+
+                , test "foldDoc: empty array returns empty" <|
+                    \_ ->
+                        let
+                            maybeActual = P.prettyFormat cf80 (P.foldDoc P.concat [])
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "" actual
+
+                , test "foldDoc: singleton array returns that element unchanged" <|
+                    \_ ->
+                        let
+                            d = P.foldDoc P.hardNlConcat [ P.text "only" ]
+                            maybeActual = P.prettyFormat cf80 d
+                        in
+                            when maybeActual is
+                                Nothing -> Expect.fail "document failed to render"
+                                Just actual -> Expect.equal "only" actual
+
+                ]
+
+            ]

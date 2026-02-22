@@ -1,0 +1,146 @@
+module OCamlExamples exposing (..)
+
+import Expect exposing (Expectation)
+import Test exposing (..)
+
+import PrettyExpressive as P
+
+{- The examples in this file come from:
+
+https://sorawee.github.io/pretty-expressive-ocaml/pretty_expressive/index.html
+-}
+
+docTest : Test
+docTest =
+    let
+        cf80 : P.CostFactory P.DefaultCostTuple
+        cf80 =
+            P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+        cf20 : P.CostFactory P.DefaultCostTuple
+        cf20 =
+            P.defaultCostFactory { pageWidth = 20, computationWidth = Nothing }
+
+        {- Example 1, as presented in the doc. It has a a choices between renderings.
+
+          let d = text "while (true) {" ^^
+                  nest 4
+                    (nl ^^ text "f();" ^^ nl ^^ text "if (done())" ^^
+                     (let exit_d = text "exit();" in
+                      (space ^^ exit_d) <|> nest 4 (nl ^^ exit_d))) ^^
+                  nl ^^ text "}"
+        -}
+        ex1WithChoice =
+            let
+                exitD =
+                    P.text "exit();"
+            in
+            P.concat (P.text "while (true) {")
+                (P.concat
+                    (P.nest 4
+                        (P.concat P.nl
+                            (P.concat (P.text "f();")
+                                (P.concat P.nl
+                                    (P.concat (P.text "if (done())")
+                                        (P.choice
+                                            (P.concat P.space exitD)
+                                            (P.nest 4 (P.concat P.nl exitD))
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                    (P.concat P.nl (P.text "}"))
+                )
+    in
+        describe "Tests from the documentation of the OCaml implementation"
+
+            [ test "Example 1 Without Choice" <|
+                \_ ->
+                    let
+                        {- Example 1, but with the choice removed:
+
+                          let d = text "while (true) {" ^^
+                                  nest 4
+                                    (nl ^^ text "f();" ^^ nl ^^ text "if (done())" ^^
+                                      nest 4 (nl ^^ text "exit();"))) ^^
+                                  nl ^^ text "}"
+                          in
+                        -}
+                        d =
+                            P.concat (P.text "while (true) {")
+                                (P.concat
+                                    (P.nest 4
+                                        (P.concat P.nl
+                                            (P.concat (P.text "f();")
+                                                (P.concat P.nl
+                                                    (P.concat (P.text "if (done())")
+                                                        (P.nest 4
+                                                            (P.concat P.nl (P.text "exit();")))))))
+                                    )
+                                    (P.concat P.nl (P.text "}"))
+                                )
+
+
+                        expected = """
+while (true) {
+    f();
+    if (done())
+        exit();
+}"""
+
+                        maybeActual = P.prettyFormat cf80 d
+                    in
+                        when maybeActual is
+                            Nothing ->
+                                Expect.fail "document failed to print"
+                            Just actual ->
+                                Expect.equal expected actual
+
+
+            , test "Example 1 With Choice, 80 columns" <|
+                \_ ->
+                    let
+
+                        expected = """
+while (true) {
+    f();
+    if (done()) exit();
+}"""
+
+                        maybeActual = P.prettyFormat cf80 ex1WithChoice
+                    in
+                        when maybeActual is
+                            Nothing ->
+                                Expect.fail "document failed to print"
+                            Just actual ->
+                                Expect.equal expected actual
+
+            , test "Example 1 With Choice, 20 columns" <|
+                \_ ->
+                    let
+
+                        expected = """
+while (true) {
+    f();
+    if (done())
+        exit();
+}"""
+
+                        maybeActual = P.prettyFormat cf20 ex1WithChoice
+                    in
+                        when maybeActual is
+                            Nothing ->
+                                Expect.fail "document failed to print"
+                            Just actual ->
+                                Expect.equal expected actual
+
+            ]
+
+
+suite : Test
+suite =
+    describe "Translations of the unit tests from the OCaml implemenation"
+        [ docTest
+        ]

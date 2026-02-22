@@ -1,0 +1,1894 @@
+module PrettyExpressive exposing
+    ( CostFactory
+    , DefaultCostTuple
+    , Doc
+    , Info
+    , addCost
+    , align
+    , alignedConcat
+    , breakDoc
+    , choice
+    , comma
+    , concat
+    , concat_array
+    , defaultCostFactory
+    , dquote
+    , empty
+    , failDoc
+    , flatten
+    , flattenAlignedConcat
+    , foldDoc
+    , group
+    , hardNl
+    , hardNlConcat
+    , hcat
+    , lbrace
+    , lbrack
+    , lparen
+    , makeDebugFormat
+    , nest
+    , newline
+    , nl
+    , prettyFormat
+    , prettyFormatAt
+    , prettyFormatDebug
+    , prettyFormatDebugAt
+    , prettyFormatInfo
+    , prettyFormatInfoAt
+    , rbrace
+    , rbrack
+    , reset
+    , rparen
+    , space
+    , text
+    , twoColumns
+    , vcat
+    )
+
+
+{-| Pretty Expressive Printer for Gren.
+
+A port of the OCaml Pretty Expressive Printer.
+
+Reference: <https://dl.acm.org/doi/abs/10.1145/3622837>
+
+This library implements an *optimal* pretty printer. Given a page-width limit
+and a cost model, it searches all possible layouts and selects the one with
+the lowest cost. Documents are constructed from combinators and rendered with
+`prettyFormat` or `prettyFormatInfo`.
+
+Basic usage:
+
+    import PrettyExpressive as P
+
+    cf : P.CostFactory P.DefaultCostTuple
+    cf =
+        P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+    example : Maybe String
+    example =
+        P.prettyFormat cf
+            (P.text "hello" |> P.concat (P.text " world"))
+
+**Gren-specific design note:** The OCaml original used per-node mutable hash
+tables (indexed by `(column, indent)` pairs) to memoise intermediate results,
+and a global counter to assign unique IDs to nodes for sharing detection.
+Neither technique is implemented here in Gren. The omission is unlikely to matter
+for typical documents; only extremely large or heavily shared document trees
+may be noticeably slower.
+
+-}
+
+-- ============================================================
+-- Public types
+-- ============================================================
+
+import Debug
+import Math
+
+
+{-| Debugging information returned alongside a rendered string.
+
+  - `isTainted` -- `True` when the computation limit was exceeded during
+    rendering. A tainted result is still valid, but the printer may not have
+    found the globally optimal layout because it stopped tracking some
+    candidate measures beyond `CostFactory.limit`.
+  - `cost` -- the cost of the chosen layout, in whatever cost type `cost`
+    the chosen `CostFactory` uses.
+
+-}
+type alias Info cost =
+    { isTainted : Bool
+    , cost : cost
+    }
+
+
+{-| A cost factory defines how printing costs are computed and compared.
+Pass a value of this type to the rendering functions (`prettyFormat` etc.)
+to control the optimisation objective.
+
+You can supply your own instance or use `defaultCostFactory`.
+
+A cost factory is a record of functions rather than a type class, because
+Gren (like Elm) does not have type classes. Each field corresponds to one
+operation in the abstract cost algebra described in the paper.
+
+**Contracts that a valid cost factory must satisfy:**
+
+  - `le` is a total ordering.
+  - If `le a b` and `le c d` then `le (combine a c) (combine b d)`.
+  - If `a <= b` then `le (text a l) (text b l)`.
+  - If `a <= b` then `le (newline a) (newline b)`.
+  - `text c (a+b) = combine (text c a) (text (c+a) b)`.
+  - `combine` is associative with identity `text 0 0`.
+  - `text c 0 = text 0 0` for any `c`.
+  - If `a <= b` then `le (twoColumnsOverflow a) (twoColumnsOverflow b)`.
+  - If `a <= b` then `le (twoColumnsBias a) (twoColumnsBias b)`.
+
+-}
+type alias CostFactory cost =
+    { text : Int -> Int -> cost
+    -- ^ `text c l` -- cost of placing a text token of length `l` at column `c`.
+    , newline : Int -> cost
+    -- ^ `newline i` -- cost of a newline followed by `i` spaces of indentation.
+    , combine : cost -> cost -> cost
+    -- ^ Combine two costs in sequence (must be associative).
+    , le : cost -> cost -> Bool
+    -- ^ `le a b` -- True when cost `a` is no worse than cost `b`.
+    , twoColumnsBias : Int -> cost
+    -- ^ `twoColumnsBias w` -- extra cost added to each candidate column
+    --   separator in `twoColumns`, proportional to how far right the separator
+    --   sits. This steers the search toward the leftmost (tightest) separator
+    --   when several options have equal cost.
+    , twoColumnsOverflow : Int -> cost
+    -- ^ `twoColumnsOverflow w` -- cost charged when a left-column cell is wider
+    --   than the chosen column separator by `w` characters. Typically set
+    --   higher than the normal overflow cost so the printer prefers exceeding
+    --   the page width over clobbering the right column.
+    , limit : Int
+    -- ^ Computation width limit. When a column position or indentation level
+    --   exceeds this value during rendering the result is marked `Tainted`
+    --   and only a single representative layout is tracked beyond that point.
+    --   See `defaultCostFactory` for how this is set automatically.
+    , stringOfCost : cost -> String
+    -- ^ Human-readable representation of a cost value, used in debug output.
+    , debugFormat : String -> Bool -> String -> String
+    -- ^ `debugFormat content isTainted costString` -- assembles the full debug
+    --   string shown by `prettyFormatDebug`. See `makeDebugFormat`.
+    }
+
+
+{-| A pair of documents used as the payload of `DocConcat`, `DocChoice`, and
+rows of `DocTwoColumns`. Named fields (`a` for the left/first document and `b`
+for the right/second) are used instead of a plain tuple because Gren record
+patterns are more readable in deep `when` expressions.
+-}
+type alias DocPair cost =
+    { a : Doc cost
+    , b : Doc cost
+    }
+
+
+{-| The document type, parameterised by the cost type.
+
+A `Doc cost` is an *abstract description* of a piece of formatted text. It
+does not contain a concrete string; instead it encodes choices, indentation
+rules, and cost annotations that the renderer resolves into an optimal string.
+
+Construct `Doc` values exclusively with the functions in this module (`text`,
+`concat`, `choice`, `nest`, etc.). The constructors of the type are exposed so
+that pattern matching is possible in callers (e.g. unit tests), but you should
+not construct `DocContext`, `DocEvaled`, or `DocBlank` directly -- those are
+internal nodes used by the renderer and `twoColumns`.
+
+-}
+type Doc cost
+    = DocText { string : String, width : Int }
+      -- ^ A literal string. `width` is the rendered column width (currently
+      --   `String.count`, which counts Unicode scalar values; see the note in
+      --   `text` about multi-codepoint grapheme clusters).
+    | DocNewline (Maybe String)
+      -- ^ A newline. The `Maybe String` is the "flat" alternative used when
+      --   `flatten` is applied: `Nothing` means "fail to flatten" (hard
+      --   newline); `Just s` means "replace with `text s`".
+    | DocConcat (DocPair cost)
+      -- ^ Unaligned concatenation of two documents.
+    | DocChoice (DocPair cost)
+      -- ^ A choice between two layouts; the renderer picks the lower-cost one.
+    | DocNest { indent : Int, doc : Doc cost }
+      -- ^ Increase indentation by `indent` spaces for the sub-document `doc`.
+    | DocAlign (Doc cost)
+      -- ^ Set indentation to the current column position for the sub-document.
+    | DocReset (Doc cost)
+      -- ^ Reset indentation to 0 for the sub-document.
+    | DocAddCost { cost : cost, doc : Doc cost }
+      -- ^ Attach an extra cost to a document without changing its layout.
+    | DocContext (Int -> Int -> Doc cost)
+      -- ^ Internal. Produce a document from the current column and indentation
+      --   at render time. Used by `doTwoColumns` to insert padding or overflow
+      --   costs dynamically. Do not construct this directly.
+    | DocTwoColumns (Array (DocPair cost))
+      -- ^ A two-column table layout. Each pair is a (left-cell, right-cell)
+      --   row. The renderer searches for the optimal column separator position.
+      --   Invariant: the array has at least two elements (one-element arrays
+      --   are reduced to `align (concat a b)` by the `twoColumns` smart
+      --   constructor).
+    | DocBlank Int
+      -- ^ Internal. A run of `n` space characters that carries zero cost
+      --   (`cf.text 0 0`). Used by `doTwoColumns` to pad left cells to the
+      --   chosen separator column. Do not construct this directly.
+    | DocEvaled (MeasureSet cost)
+      -- ^ Internal. A pre-evaluated measure set injected back into the
+      --   document tree by `doTwoColumns` so that the resolver does not
+      --   re-evaluate shared sub-documents. Do not construct this directly.
+    | DocFail
+      -- ^ A document that always fails to render. Branches containing
+      --   `DocFail` are pruned by `choice`.
+
+
+
+-- ============================================================
+-- Internal measure types
+-- ============================================================
+
+
+{-| A single concrete layout candidate produced by the resolver.
+
+  - `last` -- the column position immediately after the last character of this
+    layout. Used as the key for Pareto-dominance comparisons: a layout that
+    ends further left leaves more horizontal room for whatever follows.
+  - `cost` -- the accumulated cost of this layout, in the cost factory's type.
+  - `layout` -- the rendered output as an array of string fragments. Kept as an
+    array of fragments (rather than one concatenated string) to avoid O(n^2)
+    string building; fragments are joined with `String.join ""` only at the
+    very end in `prettyFormatInfoAt`.
+
+-}
+type alias Measure cost =
+    { last : Int
+    , cost : cost
+    , layout : Array String
+    }
+
+
+{-| The set of candidate layouts for a document at a given `(column, indent)`
+position.
+
+  - `Measures ms` -- a Pareto-optimal set of measures, sorted by `last` in
+    **descending** order (widest first). No measure in the array is dominated
+    by another: for any two measures `m1` and `m2`, if `m1.last <= m2.last`
+    then `m2.cost < m1.cost` (otherwise the cheaper-and-shorter measure would
+    have been dropped).
+  - `Tainted thunk` -- the computation limit was exceeded. Only one layout is
+    tracked; `thunk {}` forces it. A `Tainted` result is valid but may not be
+    globally optimal.
+
+The rendering pipeline maintains the invariant that `Measures []` only arises
+from `DocFail`. Any non-fail document at a reachable position produces at
+least one measure.
+
+In Gren, thunks are modelled as `{} -> a` (a function from an empty record
+to a value). This is the idiomatic Gren equivalent of OCaml's `unit -> a`.
+
+-}
+type MeasureSet cost
+    = Measures (Array (Measure cost))
+    | Tainted ({} -> Measure cost)
+
+
+
+-- ============================================================
+-- Document constructors
+-- ============================================================
+
+
+{-| A document for literal text content. The string must not contain a newline
+character; use `nl`, `hardNl`, or `newline` for line breaks.
+
+**Unicode width caveat:** The `width` field is currently set to
+`String.count s`, which counts Unicode scalar values (code points). This is
+incorrect for scripts such as Hindi or Thai where multiple code points combine
+into a single rendered character cell (a grapheme cluster). Once a Gren
+Unicode grapheme-cluster package is available this should be replaced with a
+function that counts *rendered* column widths.
+
+-}
+text : String -> Doc cost
+text s =
+    DocText { string = s, width = String.count s }
+
+
+{-| The general newline primitive. All other newline combinators are built
+from this one.
+
+  - `newline Nothing` -- a hard newline: `flatten` turns it into `failDoc`.
+  - `newline (Just s)` -- a soft newline: `flatten` turns it into `text s`.
+
+After the newline is emitted, indentation spaces are inserted according to
+the current indentation level (as set by `nest`, `align`, and `reset`).
+
+-}
+newline : Maybe String -> Doc cost
+newline =
+    DocNewline
+
+
+{-| A newline that flattens to a single space.
+
+This is the most common newline in practice: it means "break the line here if
+necessary; otherwise substitute a space". It is the building block of `group`.
+
+-}
+nl : Doc cost
+nl =
+    DocNewline (Just " ")
+
+
+{-| A newline that flattens to an empty string.
+
+Use this when adjacent tokens should touch with no separator in the flat form,
+but may be placed on separate lines in the broken form.
+It produces an empty string only when it appears inside group (or an explicit flatten).
+
+-}
+breakDoc : Doc cost
+breakDoc =
+    DocNewline (Just "")
+
+
+{-| A newline that cannot be flattened.
+
+`flatten hardNl` yields `failDoc`, causing any layout that tried to flatten
+across a `hardNl` to be pruned. Use this wherever a line break is mandatory
+regardless of available width -- for instance between top-level definitions.
+
+-}
+hardNl : Doc cost
+hardNl =
+    DocNewline Nothing
+
+
+{-| A document that always fails to render.
+
+On its own, rendering a `failDoc` returns `Nothing`. Its power comes from
+pairing it with `choice`: the printer prunes any branch that contains a
+`failDoc`, automatically falling back to the other branch.
+
+-}
+failDoc : Doc cost
+failDoc =
+    DocFail
+
+
+{-| The empty document. Equivalent to `text ""`.
+
+`empty` is the identity element of `concat`: `concat empty d == d` and
+`concat d empty == d`. These equalities are enforced structurally in the
+`concat` smart constructor, so no extra node is allocated.
+
+-}
+empty : Doc cost
+empty =
+    DocText { string = "", width = 0 }
+
+
+{-| A single space character. Equivalent to `text " "`. -}
+space : Doc cost
+space =
+    text " "
+
+
+{-| A comma. Equivalent to `text ","`. -}
+comma : Doc cost
+comma =
+    text ","
+
+
+{-| A left square bracket. Equivalent to `text "["`. -}
+lbrack : Doc cost
+lbrack =
+    text "["
+
+
+{-| A right square bracket. Equivalent to `text "]"`. -}
+rbrack : Doc cost
+rbrack =
+    text "]"
+
+
+{-| A left curly brace. Equivalent to `text "{"`. -}
+lbrace : Doc cost
+lbrace =
+    text "{"
+
+
+{-| A right curly brace. Equivalent to `text "}"`. -}
+rbrace : Doc cost
+rbrace =
+    text "}"
+
+
+{-| A left parenthesis. Equivalent to `text "("`. -}
+lparen : Doc cost
+lparen =
+    text "("
+
+
+{-| A right parenthesis. Equivalent to `text ")"`. -}
+rparen : Doc cost
+rparen =
+    text ")"
+
+
+{-| A double-quote character. Equivalent to `text "\""`. -}
+dquote : Doc cost
+dquote =
+    text "\""
+
+
+{-| Unaligned concatenation of two documents.
+
+`concat a b` renders `a` followed immediately by `b`. The right document is
+*not* treated as a rigid box: it does not inherit any special alignment from
+where `a` ended. This "unaligned" semantics makes it straightforward to format
+C-style code where braces, brackets, and parentheses should flow freely.
+
+The smart constructor applies several normalisation rules at build time to keep
+the document tree compact:
+
+  - Either operand being `DocFail` short-circuits to `DocFail`.
+  - Either operand being `DocText { width = 0 }` (i.e. `empty`) is dropped.
+  - Two adjacent `DocText` nodes are fused into one.
+  - A `DocAddCost` on either operand is floated outward, keeping cost
+    annotations above structural nodes. This normalises the tree shape so
+    the resolver sees consistent node forms.
+
+-}
+concat : Doc cost -> Doc cost -> Doc cost
+concat d1 d2 =
+    when { d1 = d1, d2 = d2 } is
+        { d1 = DocFail, d2 = _ } ->
+            DocFail
+
+        { d1 = _, d2 = DocFail } ->
+            DocFail
+
+        { d1 = DocText { string = _, width = 0 }, d2 = _ } ->
+            d2
+
+        { d1 = _, d2 = DocText { string = _, width = 0 } } ->
+            d1
+
+        { d1 = DocText { string = s1, width = w1 }, d2 = DocText { string = s2, width = w2 } } ->
+            DocText { string = (s1 ++ s2), width = w1 + w2 }
+
+        -- Float cost annotations outward so that structural nodes are never
+        -- wrapped inside a DocAddCost. This normalises the tree and ensures
+        -- that the resolver sees consistent node shapes.
+        { d1 = _, d2 = DocAddCost { cost = c, doc = inner2 } } ->
+            addCost c (concat d1 inner2)
+
+        { d1 = DocAddCost { cost = c, doc = inner1 }, d2 = _ } ->
+            addCost c (concat inner1 d2)
+
+        _ ->
+            DocConcat { a = d1, b = d2 }
+
+
+{-| Concatenate an array of documents right-associatively.
+
+    concat_array [ a, b, c, d ]
+        == concat a (concat b (concat c d))
+
+Right-associativity matches the natural reading order and avoids building a
+left-leaning tree that would require deep recursion to resolve. An empty array
+returns `empty`; a singleton array returns its sole element unchanged.
+
+-}
+concat_array : Array (Doc cost) -> Doc cost
+concat_array docs =
+    when Array.popFirst docs is
+        -- Empty array: return the identity element.
+        Nothing ->
+            empty
+
+        Just { first = adoc, rest = after_a } ->
+            when Array.popFirst after_a is
+                -- Singleton: nothing to concatenate.
+                Nothing ->
+                    adoc
+
+                -- Two or more elements: prepend `adoc` and recurse on the tail.
+                Just _ ->
+                    concat adoc (concat_array after_a)
+
+
+{-| Choose between two document layouts; the printer picks the cheaper one.
+
+Both branches are fully evaluated by the resolver. The resulting measure sets
+are merged with Pareto-dominance filtering: a layout from one branch is
+discarded if the other branch has a layout that is both cheaper *and* ends no
+further right.
+
+If either branch is `failDoc` it is dropped and the other is returned
+unconditionally, without creating a `DocChoice` node.
+
+-}
+choice : Doc cost -> Doc cost -> Doc cost
+choice d1 d2 =
+    when { d1 = d1, d2 = d2 } is
+        { d1 = DocFail, d2 = _ } ->
+            d2
+
+        { d1 = _, d2 = DocFail } ->
+            d1
+
+        _ ->
+            DocChoice { a = d1, b = d2 }
+
+
+{-| Increase the indentation level by `n` spaces for the duration of `d`.
+
+`nest` only affects where newlines land -- it does not insert any spaces
+immediately. If multiple `nest` calls are nested, their amounts accumulate.
+
+The smart constructor has several pass-through cases where wrapping in
+`DocNest` would have no effect:
+
+  - `DocFail` -- propagate failure.
+  - `DocAlign` -- `align` has already fixed the indentation to the current
+    column; an outer `nest` cannot override that.
+  - `DocReset` -- `reset` fixes indentation to 0; same reasoning.
+  - `DocText` -- plain text carries no newlines, so indentation is irrelevant.
+  - `DocAddCost` -- float the cost annotation outward (same normalisation as
+    in `concat`).
+
+-}
+nest : Int -> Doc cost -> Doc cost
+nest n d =
+    when d is
+        DocFail ->
+            DocFail
+
+        -- These nodes fix the indentation themselves; nesting has no effect.
+        DocAlign _ ->
+            d
+
+        DocReset _ ->
+            d
+
+        DocText { string = _, width = _ } ->
+            d
+
+        DocAddCost { cost = c, doc = inner } ->
+            addCost c (nest n inner)
+
+        _ ->
+            DocNest { indent = n, doc = d }
+
+
+{-| Set the indentation level to the current column position for `d`.
+
+This "pins" `d` so that its internal newlines indent back to the column where
+`d` starts, regardless of the surrounding `nest` context. It is the key
+combinator for hanging indentation and argument-list alignment.
+
+Pass-through cases are the same as `nest`: `DocFail`, `DocAlign`, `DocReset`,
+`DocText`, and `DocAddCost` (floated outward).
+
+-}
+align : Doc cost -> Doc cost
+align d =
+    when d is
+        DocFail ->
+            DocFail
+
+        DocAlign _ ->
+            d
+
+        DocReset _ ->
+            d
+
+        DocText { string = _, width = _ } ->
+            d
+
+        DocAddCost { cost = c, doc = inner } ->
+            addCost c (align inner)
+
+        _ ->
+            DocAlign d
+
+
+{-| Reset the indentation level to 0 for `d`.
+
+Any newlines inside `d` will indent to column 0, regardless of the surrounding
+`nest` or `align` context. Useful for top-level declarations or other constructs
+that must always begin at the left margin.
+
+Pass-through cases match `nest` and `align`.
+
+-}
+reset : Doc cost -> Doc cost
+reset d =
+    when d is
+        DocFail ->
+            DocFail
+
+        DocAlign _ ->
+            d
+
+        DocReset _ ->
+            d
+
+        DocText { string = _, width = _ } ->
+            d
+
+        DocAddCost { cost = c, doc = inner } ->
+            addCost c (reset inner)
+
+        _ ->
+            DocReset d
+
+
+{-| Attach an extra cost `c` to document `d` without changing its layout.
+
+The additional cost is combined with `d`'s ordinary layout cost using
+`CostFactory.combine`. This lets you nudge the optimiser toward or away from
+specific layouts when the default cost model does not capture your preferences
+precisely.
+
+`addCost` on `DocFail` returns `DocFail` unchanged, since a failing document
+produces no layout to charge.
+
+-}
+addCost : cost -> Doc cost -> Doc cost
+addCost c d =
+    when d is
+        DocFail ->
+            DocFail
+
+        _ ->
+            DocAddCost { cost = c, doc = d }
+
+
+
+-- ============================================================
+-- Derived combinators
+-- ============================================================
+
+
+{-| Replace all newlines in a document with their "flat" alternative.
+    That is, convert the document to a one-line version.
+
+The mapping for each newline variant is:
+
+  - `nl`               -> `text " "`   (was `DocNewline (Just " ")`)
+  - `breakDoc`         -> `text ""`    (was `DocNewline (Just "")`)
+  - `hardNl`           -> `failDoc`    (was `DocNewline Nothing`)
+  - `newline (Just s)` -> `text s`
+  - `newline Nothing`  -> `failDoc`
+
+For structural nodes, `flatten` recurses into the children:
+
+  - `DocConcat`, `DocChoice` -- recurse into both children.
+  - `DocNest`, `DocAlign`, `DocReset` -- these only affect indentation; in a
+    flat document there are no newlines to indent to, so the wrapper is
+    dropped and only the inner document is flattened.
+  - `DocAddCost` -- cost annotation is preserved; inner doc is flattened.
+  - `DocTwoColumns` -- a two-column layout always has at least two rows and
+    therefore contains mandatory newlines between rows. Returns `failDoc`.
+  - `DocContext`, `DocEvaled` -- internal nodes that should not appear in
+    user-constructed documents. Return `failDoc` defensively.
+
+-}
+flatten : Doc cost -> Doc cost
+flatten d =
+    when d is
+        DocFail ->
+            DocFail
+
+        DocText { string = _, width = _ } ->
+            d
+
+        DocBlank _ ->
+            -- DocBlank is internal (used by twoColumns for column padding).
+            -- It has no newlines, so it flattens to itself.
+            d
+
+        DocNewline Nothing ->
+            -- Hard newline: flattening is not possible.
+            DocFail
+
+        DocNewline (Just s) ->
+            -- Soft newline: replace with its designated flat-form string.
+            text s
+
+        DocConcat { a = d1, b = d2 } ->
+            concat (flatten d1) (flatten d2)
+
+        DocChoice { a = d1, b = d2 } ->
+            choice (flatten d1) (flatten d2)
+
+        DocNest { indent = _, doc = inner } ->
+            -- Indentation is irrelevant in a flat document; drop the wrapper.
+            flatten inner
+
+        DocAlign inner ->
+            flatten inner
+
+        DocReset inner ->
+            flatten inner
+
+        DocAddCost { cost = c, doc = inner } ->
+            addCost c (flatten inner)
+
+        DocTwoColumns _ ->
+            -- Two-column layouts span multiple lines and cannot be flattened.
+            DocFail
+
+        DocContext _ ->
+            -- Internal node; should not appear in user documents.
+            DocFail
+
+        DocEvaled _ ->
+            -- Internal node; should not appear in user documents.
+            DocFail
+
+
+{-| Try the document as-is; fall back to its flattened form if that is cheaper.
+
+`group d` is shorthand for `choice d (flatten d)`. It is the standard
+combinator for "break this if necessary, otherwise keep it on one line" -- the
+core idiom of most pretty printers.
+
+Because `choice` drops `failDoc` branches, if `flatten d` fails (e.g. because
+`d` contains a `hardNl`) then `group d` is equivalent to `d` alone.
+
+-}
+group : Doc cost -> Doc cost
+group d =
+    choice d (flatten d)
+
+
+{-| Aligned concatenation: append `b` to `a` with `b` anchored to the column
+where `a` ends.
+
+Equivalent to `concat a (align b)`. Also known as *box concatenation* -- `b`
+is treated as a rigid box whose left edge is pinned to `a`'s end column.
+
+-}
+alignedConcat : Doc cost -> Doc cost -> Doc cost
+alignedConcat d1 d2 =
+    concat d1 (align d2)
+
+
+{-| Concatenate `a` and `b` with a mandatory line break between them.
+
+Equivalent to `concat a (concat hardNl b)`. Used by `vcat` to stack
+documents vertically.
+
+-}
+hardNlConcat : Doc cost -> Doc cost -> Doc cost
+hardNlConcat d1 d2 =
+    concat d1 (concat hardNl d2)
+
+
+{-| Flatten `a`, then concatenate with `b` aligned to `a`'s end column.
+
+Equivalent to `alignedConcat (flatten a) b`. Useful when you want aligned
+(box) concatenation but want to guarantee that the left operand never spans
+multiple lines -- if `flatten a` fails, the whole expression fails and a
+surrounding `choice` can select an alternative layout.
+
+-}
+flattenAlignedConcat : Doc cost -> Doc cost -> Doc cost
+flattenAlignedConcat d1 d2 =
+    alignedConcat (flatten d1) d2
+
+
+{-| Fold an array of documents with a binary combinator.
+
+The fold is left-associative: `foldDoc f [a, b, c]` is `f (f a b) c`.
+Returns `empty` for an empty array.
+
+-}
+foldDoc : (Doc cost -> Doc cost -> Doc cost) -> Array (Doc cost) -> Doc cost
+foldDoc f ds =
+    when Array.popFirst ds is
+        Nothing ->
+            empty
+
+        Just { first = first, rest = rest } ->
+            Array.foldl (\elem acc -> f acc elem) first rest
+
+
+{-| Stack documents vertically with hard newlines between them.
+
+`vcat [a, b, c]` is equivalent to `hardNlConcat a (hardNlConcat b c)`.
+Returns `empty` for an empty array.
+
+-}
+vcat : Array (Doc cost) -> Doc cost
+vcat =
+    foldDoc hardNlConcat
+
+
+{-| Concatenate documents horizontally with flatten-aligned concatenation.
+
+`hcat [a, b, c]` places each document to the right of the previous one,
+aligned to the column where the previous document ended, with each left
+operand flattened first. If any left operand fails to flatten, the
+surrounding `choice` can select an alternative.
+
+Returns `empty` for an empty array.
+
+-}
+hcat : Array (Doc cost) -> Doc cost
+hcat =
+    foldDoc flattenAlignedConcat
+
+
+{-| Two-column table layout for an array of `{ a, b }` document pairs.
+
+The printer searches for the optimal *column separator* -- the column at which
+the right (`b`) cells begin -- and picks the position that minimises total cost
+across all rows simultaneously.
+
+Each row is rendered as:
+
+    concat left_cell (concat padding right_cell)
+
+where `padding` is either blank spaces (if the left cell ended before the
+separator) or a `twoColumnsOverflow` cost charge (if the left cell overshot
+the separator).
+
+**Degenerate cases:**
+
+  - Empty array -> `empty`.
+  - Single pair -> `align (concat a b)` (no separator search needed).
+  - Any pair where `a` or `b` is `failDoc` -> `failDoc`.
+
+**Cost-factory hooks:**
+
+  - `twoColumnsOverflow w` -- charged when a left cell overshoots the separator
+    by `w` columns. Setting this higher than the normal page-overflow cost
+    makes the printer prefer exceeding the page width over clobbering the right
+    column.
+  - `twoColumnsBias w` -- a small penalty proportional to `w`, the distance of
+    the separator from the left edge. This breaks ties in favour of the
+    leftmost (tightest) valid separator.
+
+-}
+twoColumns : Array (DocPair cost) -> Doc cost
+twoColumns ds =
+    let
+        isFail d =
+            when d is
+                DocFail ->
+                    True
+
+                _ ->
+                    False
+
+        popped =
+            Array.popFirst ds
+    in
+    when popped is
+        Nothing ->
+            empty
+
+        Just { first = first, rest = rest } ->
+            if Array.isEmpty rest then
+                -- Single row: simple aligned concatenation, no separator search.
+                align (concat first.a first.b)
+
+            else if Array.any (\pair -> isFail pair.a || isFail pair.b) ds then
+                DocFail
+
+            else
+                DocTwoColumns ds
+
+
+
+-- ============================================================
+-- Internal measure operations
+-- ============================================================
+
+
+{-| Test whether measure `m1` *dominates* measure `m2`.
+
+`m1` dominates `m2` when it is at least as good on every criterion:
+
+  - `m1.last <= m2.last` -- `m1` ends no further right, leaving at least as
+    much horizontal room for subsequent content.
+  - `cf.le m1.cost m2.cost` -- `m1` costs no more than `m2`.
+
+When `m1` dominates `m2`, `m2` can be safely discarded from the candidate set
+without affecting the final result -- whatever comes next will always prefer the
+measure that both ends shorter and costs less.
+
+-}
+dominates : CostFactory cost -> Measure cost -> Measure cost -> Bool
+dominates cf m1 m2 =
+    m1.last <= m2.last && cf.le m1.cost m2.cost
+
+
+{-| Merge two Pareto-optimal measure arrays into one Pareto-optimal array.
+
+Both input arrays must be sorted by `last` in **descending** order. The output
+is also sorted by `last` descending.
+
+The merge is a simultaneous scan of both arrays. At each step:
+
+  - If `m1` dominates `m2`, drop `m2` and advance the right pointer.
+  - If `m2` dominates `m1`, drop `m1` and advance the left pointer.
+  - Otherwise, emit whichever has the larger `last` first (to preserve
+    descending order) and advance that pointer.
+
+The result contains no dominated measures.
+
+-}
+mergeLists :
+    CostFactory cost
+    -> Array (Measure cost)
+    -> Array (Measure cost)
+    -> Array (Measure cost)
+mergeLists cf ms1 ms2 =
+    let
+        aPopped =
+            Array.popFirst ms1
+
+        bPopped =
+            Array.popFirst ms2
+    in
+    when { aPopped = aPopped, bPopped = bPopped } is
+        { aPopped = Nothing, bPopped = _ } ->
+            ms2
+
+        { aPopped = _, bPopped = Nothing } ->
+            ms1
+
+        { aPopped = Just { first = m1, rest = ms1rest }, bPopped = Just { first = m2, rest = ms2rest } } ->
+            if dominates cf m1 m2 then
+                -- m1 is at least as good as m2 on all measures; discard m2.
+                mergeLists cf ms1 ms2rest
+
+            else if dominates cf m2 m1 then
+                -- m2 is at least as good as m1 on all measures; discard m1.
+                mergeLists cf ms1rest ms2
+
+            else if m1.last > m2.last then
+                -- Neither dominates; emit the wider one first to keep
+                -- the output sorted by `last` descending.
+                [ m1 ] ++ mergeLists cf ms1rest ms2
+
+            else
+                [ m2 ] ++ mergeLists cf ms1 ms2rest
+
+
+{-| Merge two measure *sets*, respecting the `Tainted` sentinel.
+
+  - If the **right** set is `Tainted`, return the left set. The left set was
+    computed within the computation limit and is therefore strictly preferable.
+  - If the **left** set is `Tainted`, return the right set for the same reason.
+  - If both are `Measures`, delegate to `mergeLists`.
+
+A `Tainted` result is always superseded by any non-tainted alternative.
+
+-}
+mergeSets : CostFactory cost -> MeasureSet cost -> MeasureSet cost -> MeasureSet cost
+mergeSets cf ml1 ml2 =
+    when { a = ml1, b = ml2 } is
+        { a = _, b = Tainted _ } ->
+            -- Right is tainted; prefer the left (non-tainted) set.
+            ml1
+
+        { a = Tainted _, b = _ } ->
+            -- Left is tainted; prefer the right (non-tainted) set.
+            ml2
+
+        { a = Measures ms1, b = Measures ms2 } ->
+            Measures (mergeLists cf ms1 ms2)
+
+
+{-| Combine two consecutive measures into one.
+
+The resulting measure:
+
+  - ends at `m2.last` (the right document determines the final column);
+  - has cost `cf.combine m1.cost m2.cost`;
+  - has layout `m1.layout ++ m2.layout` (array concatenation, deferred until
+    `String.join ""` at render time to avoid O(n^2) string building).
+
+-}
+appendMeasures : CostFactory cost -> Measure cost -> Measure cost -> Measure cost
+appendMeasures cf m1 m2 =
+    { last = m2.last
+    , cost = cf.combine m1.cost m2.cost
+    , layout = m1.layout ++ m2.layout
+    }
+
+
+{-| Resolve a `DocConcat` node by combining measure sets from its two operands.
+
+`processConcat cf processLeft ml1` takes:
+
+  - `cf` -- the cost factory (for `appendMeasures`).
+  - `processLeft` -- given a measure for the left operand, returns the measure
+    set for the right operand starting at `m1.last`.
+  - `ml1` -- the measure set for the left operand.
+
+For each left measure `m1`, it calls `processLeft m1` to get right-side
+candidates, then combines them with `m1` via `appendMeasures`. Results for
+different left measures are merged with `mergeSets`.
+
+**Tainted case:** When the left side is tainted, we force its single measure
+immediately and pair it with the best available right measure, wrapping the
+result in a new `Tainted` thunk.
+
+**Inner `loop`:** Within the `Measures` case, the right-side candidates are
+sorted by `last` descending. The loop scans them in order, tracking the
+lowest-cost combination seen so far (`currentBest`). A combination is emitted
+to the result only when the next combination has a strictly higher cost (i.e.
+is not dominated). This is the Pareto filter that keeps the combined set
+optimal.
+
+-}
+processConcat :
+    CostFactory cost
+    -> (Measure cost -> MeasureSet cost)
+    -> MeasureSet cost
+    -> MeasureSet cost
+processConcat cf processLeft ml1 =
+    when ml1 is
+        Tainted mt1 ->
+            -- Left side exceeded the computation limit. Force the single
+            -- representative left measure and pair it with the best right match.
+            Tainted
+                (\{} ->
+                    let
+                        m1 =
+                            mt1 {}
+                    in
+                    when processLeft m1 is
+                        Tainted mt2 ->
+                            appendMeasures cf m1 (mt2 {})
+
+                        Measures ms ->
+                            when Array.popFirst ms is
+                                Nothing ->
+                                    -- Unreachable: right side should not fail
+                                    -- when the left side already succeeded.
+                                    m1
+
+                                Just { first = m2 } ->
+                                    appendMeasures cf m1 m2
+                )
+
+        Measures ms1 ->
+            let
+                -- For a single left measure m1, build the Pareto-optimal set
+                -- of (m1 ++ m2) combinations across all right measures m2.
+                doOne m1 =
+                    when processLeft m1 is
+                        Tainted mt2 ->
+                            Tainted (\{} -> appendMeasures cf m1 (mt2 {}))
+
+                        Measures ms ->
+                            when Array.popFirst ms is
+                                Nothing ->
+                                    Measures []
+
+                                Just { first = m2, rest = ms2 } ->
+                                    let
+                                        -- Right measures are sorted by `last` descending.
+                                        -- Scan them, tracking the best (lowest-cost)
+                                        -- combination seen so far. Emit `currentBest` to
+                                        -- the result when we encounter a combination that
+                                        -- costs more (it ends shorter and is not dominated).
+                                        loop ms_ result currentBest =
+                                            when Array.popFirst ms_ is
+                                                Nothing ->
+                                                    -- Reverse [currentBest] and prepend to
+                                                    -- result to restore descending-last order.
+                                                    Array.reverse [ currentBest ] ++ result
+
+                                                Just { first = m, rest = rest } ->
+                                                    let
+                                                        current =
+                                                            appendMeasures cf m1 m
+                                                    in
+                                                    if cf.le current.cost currentBest.cost then
+                                                        -- `current` costs no more than
+                                                        -- `currentBest` and ends further left:
+                                                        -- it dominates currentBest. Replace it.
+                                                        loop rest result current
+
+                                                    else
+                                                        -- `currentBest` is not dominated;
+                                                        -- emit it and move on.
+                                                        loop rest ([ currentBest ] ++ result) current
+                                    in
+                                    Measures (loop ms2 [] (appendMeasures cf m1 m2))
+
+                -- Process each left measure individually, then merge all the
+                -- resulting sets into one Pareto-optimal combined set.
+                -- A right-fold processes wider left measures first, which tends
+                -- to produce more aggressive early pruning.
+                foldRight ms =
+                    when Array.popFirst ms is
+                        Nothing ->
+                            Measures []
+
+                        Just { first = m, rest = rest } ->
+                            if Array.isEmpty rest then
+                                doOne m
+
+                            else
+                                mergeSets cf (doOne m) (foldRight rest)
+            in
+            foldRight ms1
+
+
+{-| Extract a single best measure from a measure set, if one exists.
+
+Returns `Nothing` only for `Measures []`, which represents `DocFail` and
+should not occur for any non-fail document. For `Tainted`, forces the thunk.
+For `Measures (m :: _)`, returns the first element, which has the largest
+`last` value (widest ending column) since the array is sorted descending.
+
+-}
+chooseOne : MeasureSet cost -> Maybe (Measure cost)
+chooseOne ms =
+    when ms is
+        Tainted mt ->
+            Just (mt {})
+
+        Measures mms ->
+            when Array.popFirst mms is
+                Nothing ->
+                    Nothing
+
+                Just { first = m } ->
+                    Just m
+
+
+
+-- ============================================================
+-- Two-column layout implementation
+-- ============================================================
+
+
+{-| Working record used inside `doTwoColumns`.
+
+Each element of the `afterList` array pairs:
+
+  - `measureSet` -- the pre-evaluated `MeasureSet` for this row's left cell,
+    used to enumerate candidate separator positions.
+  - `a` -- a `DocEvaled measureSet` node so that `resolve` returns the stored
+    measures directly without re-evaluating the left cell.
+  - `b` -- the right-cell document for this row.
+
+-}
+type alias TwoColumnRec cost =
+    { measureSet : MeasureSet cost
+    , a : Doc cost
+    , b : Doc cost
+    }
+
+
+{-| Resolve a `DocTwoColumns` node into a `MeasureSet`.
+
+This is the most complex part of the renderer. The high-level algorithm:
+
+1. Evaluate all left cells at `(c, c)` (column and indent both equal to `c`,
+   matching the implicit `align` that `twoColumns` would produce at the
+   call site).
+
+2. Record each row's left-cell measure set in a `TwoColumnRec`. Any `Tainted`
+   thunks are forced immediately so their result is shared across all the
+   `DocChoice` nodes that reference it, rather than being re-computed each time.
+
+3. Call `loopLimit`, which builds a `DocChoice` tree by trying every distinct
+   `last` value from every row's left-cell measures as a candidate separator
+   column `cSep`. For each candidate, a full table document is assembled
+   (with `buildBefore`, `buildRow`, `buildAfter`) and offered as a `choice`
+   branch. A `twoColumnsBias` cost is added to prefer the leftmost separator.
+
+4. Evaluate the resulting choice document at `(c, c)` to obtain the final
+   measure set.
+
+If any left cell was tainted, the whole result is wrapped in a `Tainted`
+thunk so the calling resolver handles it correctly.
+
+-}
+doTwoColumns :
+    CostFactory cost
+    -> (Doc cost -> Int -> Int -> MeasureSet cost)
+    -> Array (DocPair cost)
+    -> Int
+    -> MeasureSet cost
+doTwoColumns cf self pairs c =
+    let
+        -- Evaluate every left cell. Both column and indent are set to `c`
+        -- because the overall twoColumns node is implicitly aligned.
+        leftMsList =
+            Array.map (\{ a = d1 } -> self d1 c c) pairs
+
+        leftAnyTainted =
+            Array.any
+                (\ms ->
+                    when ms is
+                        Tainted _ ->
+                            True
+
+                        _ ->
+                            False
+                )
+                leftMsList
+
+        -- Build one row's document for a given separator column `cSep`.
+        -- A `DocContext` node reads the actual column at render time:
+        --   - If the left cell ended before `cSep`, insert blank padding.
+        --   - If it overshot `cSep`, charge a `twoColumnsOverflow` cost.
+        buildRow cSep d1 d2 =
+            concat d1
+                (concat
+                    (DocContext
+                        (\cIn _ ->
+                            if cSep >= cIn then
+                                DocBlank (cSep - cIn)
+
+                            else
+                                addCost (cf.twoColumnsOverflow (cIn - cSep)) empty
+                        )
+                    )
+                    d2
+                )
+
+        -- Reconstruct all rows that precede the "current" row in the table,
+        -- given separator column `cSep`. `before` is stored in reverse order
+        -- (most-recently-added row at the head), so we recurse to the tail
+        -- first to emit rows in original top-to-bottom order.
+        buildBefore : Array (TwoColumnRec cost) -> Int -> Doc cost
+        buildBefore before cSep =
+            when Array.popFirst before is
+                Nothing ->
+                    empty
+
+                Just { first = first, rest = rest } ->
+                    concat (buildBefore rest cSep)
+                        (concat (buildRow cSep first.a first.b) hardNl)
+
+        -- Reconstruct all rows that follow the "current" row in the table.
+        buildAfter after cSep =
+            when Array.popFirst after is
+                Nothing ->
+                    empty
+
+                Just { first = first, rest = rest } ->
+                    concat hardNl
+                        (concat (buildRow cSep first.a first.b) (buildAfter rest cSep))
+
+        -- Assemble the complete table document for a given separator column.
+        buildChoice cSep before curLeft curRight after =
+            concat (buildBefore before cSep)
+                (concat (buildRow cSep curLeft curRight)
+                    (buildAfter after cSep)
+                )
+
+        -- Build the TwoColumnRec working list. Tainted thunks are forced now
+        -- so each measure is computed once and shared across all the DocChoice
+        -- branches that reference it.
+        afterList =
+            Array.map2
+                (\ms { b = d2 } ->
+                    let
+                        ms_ =
+                            when ms is
+                                Tainted mt ->
+                                    let
+                                        m =
+                                            mt {}
+                                    in
+                                    -- Re-wrap in a new Tainted so the type is
+                                    -- consistent, but the thunk now returns the
+                                    -- already-computed measure (no re-evaluation).
+                                    Tainted (\{} -> m)
+
+                                _ ->
+                                    ms
+                    in
+                    { measureSet = ms_
+                    , a = DocEvaled ms_
+                    , b = d2
+                    }
+                )
+                leftMsList
+                pairs
+
+        -- Search for the optimal separator by building a tree of DocChoice
+        -- nodes. `before` accumulates already-processed rows (reversed);
+        -- `after` holds the remaining rows. For each row we try each of its
+        -- left-measure `last` values as a candidate separator column.
+        loopLimit before after =
+            when Array.popFirst after is
+                Nothing ->
+                    DocFail
+
+                Just { first = tup, rest = rest } ->
+                    let
+                        ms =
+                            tup.measureSet
+
+                        right =
+                            tup.b
+
+                        -- Build the full table for separator `cSep` and add a
+                        -- twoColumnsBias cost so that among equally good layouts
+                        -- the leftmost separator wins.
+                        buildChoiceForSep cSep ms_ =
+                            addCost (cf.twoColumnsBias (cSep - c))
+                                (buildChoice cSep before (DocEvaled ms_) right rest)
+                    in
+                    when ms is
+                        Tainted mt ->
+                            -- Only one candidate: the tainted measure's last.
+                            let
+                                m =
+                                    mt {}
+                            in
+                            buildChoiceForSep m.last ms
+
+                        Measures msList ->
+                            let
+                                -- Try each distinct last value as a separator.
+                                innerLoop msList_ =
+                                    when Array.popFirst msList_ is
+                                        Nothing ->
+                                            DocFail
+
+                                        Just { first = m, rest = rest_ } ->
+                                            choice
+                                                (buildChoiceForSep m.last (Measures [ m ]))
+                                                (innerLoop rest_)
+                            in
+                            -- Also recurse into later rows: their left cells
+                            -- may produce better (wider) separator positions.
+                            choice (innerLoop msList) (loopLimit ([ tup ] ++ before) rest)
+
+        getMeasureSet {} =
+            -- Evaluate the assembled choice document at (column=c, indent=c).
+            self (loopLimit [] afterList) c c
+
+        -- Force a MeasureSet to a single Measure; used when wrapping in a
+        -- Tainted thunk below.
+        chooseOneLocal ms =
+            when ms is
+                Tainted mt ->
+                    mt {}
+
+                Measures mms ->
+                    when Array.popFirst mms is
+                        Just { first = m } ->
+                            m
+
+                        Nothing ->
+                            -- Unreachable for well-formed documents.
+                            { last = c, cost = cf.text c 0, layout = [] }
+    in
+    if leftAnyTainted then
+        Tainted (\{} -> chooseOneLocal (getMeasureSet {}))
+
+    else
+        getMeasureSet {}
+
+
+
+-- ============================================================
+-- Core resolver
+-- ============================================================
+
+
+{-| Resolve a document to a `MeasureSet` at column position `c` and
+indentation level `i`.
+
+This is the heart of the printer. It recursively evaluates the document tree,
+threading the current column (`c`) and indentation (`i`) through every node.
+
+**Column vs. indentation:**
+
+  - `c` -- the column at which the *next character* will be placed. Advances
+    as text is emitted and resets to `i` after each newline.
+  - `i` -- the number of spaces emitted after the *next* newline. Controlled
+    by `nest` (adds to `i`), `align` (sets `i := c`), and `reset` (sets
+    `i := 0`).
+
+**Tainted results:** When `c` or `i` exceeds `cf.limit` the result is wrapped
+in a `Tainted` thunk. The printer still produces valid output, but stops
+maintaining the full Pareto-optimal candidate set, tracking only a single
+representative layout. This bounds memory and time cost for very wide
+documents at the price of a potentially suboptimal layout in extreme cases.
+The `isTainted` field of the returned `Info` record reflects whether this
+occurred.
+
+**`self`:** The `self` helper is a local alias for `resolve cf`, passed
+recursively into `doTwoColumns` so that function can call back into the
+resolver without needing to carry `cf` as a separate parameter every time.
+
+-}
+resolve : CostFactory cost -> Doc cost -> Int -> Int -> MeasureSet cost
+resolve cf doc c i =
+    let
+        self d c_ i_ =
+            resolve cf d c_ i_
+
+        core {} =
+            when doc is
+                DocText { string = s, width = width } ->
+                    Measures
+                        [ { last = c + width
+                          , cost = cf.text c width
+                          , layout = [ s ]
+                          }
+                        ]
+
+                DocNewline _ ->
+                    -- The flat-form string stored in `DocNewline (Just s)` is
+                    -- irrelevant here -- `flatten` replaces it with `DocText`
+                    -- before resolution reaches this point. What we handle here
+                    -- is always the "broken" case: emit a real newline and `i`
+                    -- indentation spaces.
+                    Measures
+                        [ { last = i
+                          , cost = cf.newline i
+                          , layout = [ "\n", String.repeat i " " ]
+                          }
+                        ]
+
+                DocBlank n ->
+                    -- Internal padding node used by twoColumns. Zero cost
+                    -- because the column-separator costs are charged separately
+                    -- via twoColumnsOverflow / twoColumnsBias.
+                    Measures
+                        [ { last = c + n
+                          , cost = cf.text 0 0
+                          , layout = [ String.repeat n " " ]
+                          }
+                        ]
+
+                DocConcat { a = d1, b = d2 } ->
+                    -- Evaluate the left operand, then for each resulting measure
+                    -- evaluate the right operand starting at m1.last.
+                    processConcat cf (\m1 -> self d2 m1.last i) (self d1 c i)
+
+                DocChoice { a = d1, b = d2 } ->
+                    -- Evaluate both branches and merge their measure sets.
+                    {-
+                    let
+                        _ = Debug.log "(a)" d1
+                        _ = Debug.log "(b)" d2
+                        m = Debug.log "(m)" (mergeSets cf (self d1 c i) (self d2 c i))
+                    in
+                    m
+                    -}
+                    mergeSets cf (self d1 c i) (self d2 c i)
+
+                DocNest { indent = n, doc = d } ->
+                    -- Increase indentation by n; current column is unchanged.
+                    self d c (i + n)
+
+                DocAlign d ->
+                    -- Pin indentation to the current column.
+                    self d c c
+
+                DocReset d ->
+                    -- Reset indentation to the left margin.
+                    self d c 0
+
+                DocAddCost { cost = co, doc = d } ->
+                    -- Resolve the inner document, then prepend `co` to every
+                    -- resulting measure's cost via cf.combine.
+                    let
+                        addC m =
+                            { m | cost = cf.combine co m.cost }
+                    in
+                    when self d c i is
+                        Measures ms ->
+                            Measures (Array.map addC ms)
+
+                        Tainted mt ->
+                            Tainted (\{} -> addC (mt {}))
+
+                DocContext f ->
+                    -- Produce a document from the current (c, i) and resolve it.
+                    -- Used internally by doTwoColumns for dynamic padding.
+                    self (f c i) c i
+
+                DocTwoColumns ds ->
+                    doTwoColumns cf self ds c
+
+                DocEvaled ms ->
+                    -- Return the pre-computed measure set directly. These nodes
+                    -- are injected by doTwoColumns to avoid re-evaluating shared
+                    -- left-cell sub-documents.
+                    ms
+
+                DocFail ->
+                    -- Signal failure with an empty measure set. The invariant
+                    -- is that Measures [] represents failure throughout the
+                    -- rendering pipeline.
+                    Measures []
+
+        -- Decide whether this (doc, c, i) position exceeds the computation
+        -- limit. Text nodes use c + width because we know in advance how far
+        -- right they will push the column; all other node types just check c
+        -- and i directly.
+        exceeds =
+            when doc is
+                DocText { width = width } ->
+                    c + width > cf.limit || i > cf.limit
+
+                _ ->
+                    c > cf.limit || i > cf.limit
+
+        fallbackMeasure =
+            { last = c, cost = cf.text c 0, layout = [] }
+    in
+    if exceeds then
+        -- Beyond the computation limit: wrap in Tainted, collapsing the inner
+        -- result to a single representative measure.
+        Tainted
+            (\{} ->
+                when core {} is
+                    Tainted mt ->
+                        mt {}
+
+                    Measures mms ->
+                        when Array.popFirst mms is
+                            Just { first = m, rest = _ } ->
+                                m
+
+                            Nothing ->
+                                fallbackMeasure
+            )
+
+    else
+        core {}
+
+
+
+-- ============================================================
+-- Pretty-printing entry points
+-- ============================================================
+
+
+{-| Render a document to a string, starting at column 0, and return both the
+rendered string and layout metadata.
+
+Returns `Nothing` if the document fails to render (e.g. it is `failDoc` or
+every layout branch fails).
+
+Use `prettyFormatInfoAt` if the output will be appended after existing content
+that starts at a non-zero column.
+
+-}
+prettyFormatInfo : CostFactory cost -> Doc cost -> Maybe { string : String, info : Info cost }
+prettyFormatInfo cf =
+    prettyFormatInfoAt cf 0
+
+
+{-| Like `prettyFormatInfo`, but printing begins at column `initC`.
+
+Use this when the rendered output will be placed after content that is already
+`initC` columns wide -- for example, when the document follows a label or
+prompt on the same line.
+
+-}
+prettyFormatInfoAt : CostFactory cost -> Int -> Doc cost -> Maybe { string : String, info : Info cost }
+prettyFormatInfoAt cf initC d =
+    when resolve cf d initC 0 is
+        Measures mms ->
+            when Array.popFirst mms is
+                Just { first = m, rest = _ } ->
+                    Just
+                        { string = String.join "" m.layout
+                        , info = { isTainted = False, cost = m.cost }
+                        }
+
+                Nothing ->
+                    -- Empty measure set means the document failed to render.
+                    Nothing
+
+        Tainted mt ->
+            let
+                m =
+                    mt {}
+            in
+            Just
+                { string = String.join "" m.layout
+                , info = { isTainted = True, cost = m.cost }
+                }
+
+
+{-| Render a document to a string, starting at column 0.
+
+Returns `Nothing` if the document fails to render.
+
+-}
+prettyFormat : CostFactory cost -> Doc cost -> Maybe String
+prettyFormat cf d =
+    prettyFormatInfo cf d
+        |> Maybe.map (\{ string = string } -> string)
+
+
+{-| Like `prettyFormat`, but printing begins at column `initC`. -}
+prettyFormatAt : CostFactory cost -> Int -> Doc cost -> Maybe String
+prettyFormatAt cf initC d =
+    prettyFormatInfoAt cf initC d
+        |> Maybe.map (\{ string = string } -> string)
+
+
+{-| Render a document to a string with debug information appended.
+
+The debug output includes a column ruler, the rendered content with a `|`
+marker at the page width, and the `isTainted` flag and cost of the chosen
+layout. The exact format is determined by `CostFactory.debugFormat`; the
+default implementation is `makeDebugFormat`.
+
+Returns `Nothing` if the document fails to render.
+
+-}
+prettyFormatDebug : CostFactory cost -> Doc cost -> Maybe String
+prettyFormatDebug cf d =
+    prettyFormatDebugAt cf 0 d
+
+
+{-| Like `prettyFormatDebug`, but printing begins at column `initC`. -}
+prettyFormatDebugAt : CostFactory cost -> Int -> Doc cost -> Maybe String
+prettyFormatDebugAt cf initC d =
+    prettyFormatInfoAt cf initC d
+        |> Maybe.map
+            (\{ string = content, info = info } ->
+                cf.debugFormat content info.isTainted (cf.stringOfCost info.cost)
+            )
+
+
+
+-- ============================================================
+-- Default cost factory
+-- ============================================================
+
+
+{-| The cost record used by `defaultCostFactory`.
+
+  - `badness` -- sum of squared overflows past the page width. Squaring means
+    one large overflow is penalised more heavily than several small ones, which
+    steers the printer toward layouts where overflows are spread evenly when
+    they cannot be avoided entirely.
+  - `columnOverflow` -- sum of overflows past column separators in `twoColumns`
+    layouts.
+  - `height` -- total number of newlines in the layout (i.e. number of output
+    lines minus one).
+
+-}
+type alias DefaultCostTuple =
+    { badness : Int
+    , columnOverflow : Int
+    , height : Int
+    }
+
+
+{-| The default cost factory.
+
+**Parameters:**
+
+  - `pageWidth` -- the page width limit. Text extending past this column
+    incurs `badness` cost.
+  - `computationWidth` -- optional computation width limit. Defaults to
+    `floor(1.2 * pageWidth)`. When the current column or indentation level
+    exceeds this during rendering, the result is marked `Tainted` and the
+    printer stops maintaining the full candidate set.
+
+**Cost ordering:** Costs are compared lexicographically -- `badness` is
+minimised first, then `columnOverflow`, then `height`. The printer will
+always prefer a layout that fits within the page width (even at the cost of
+more newlines), and among equally bad layouts it prefers fewer column
+overflows, then fewer newlines.
+
+**`twoColumnsOverflow`:** Charges `columnOverflow = w` *and* `height = 1`
+when a left cell overshoots the separator by `w` columns. The extra `height`
+penalty discourages the printer from choosing a separator so narrow that every
+left cell overflows.
+
+**`twoColumnsBias`:** Returns zero for all inputs in the default factory. The
+preference for leftmost separators is achieved by the order in which `loopLimit`
+tries candidates, not by a non-zero bias cost.
+
+-}
+defaultCostFactory :
+    { pageWidth : Int, computationWidth : Maybe Int }
+    -> CostFactory DefaultCostTuple
+defaultCostFactory { pageWidth, computationWidth } =
+    let
+        limit_ =
+            when computationWidth is
+                Nothing ->
+                    Math.round (toFloat pageWidth * 1.2)
+
+                Just w ->
+                    w
+
+        textCost pos len =
+            let
+                stop =
+                    pos + len
+            in
+            if stop > pageWidth then
+                let
+                    -- `maxwc` is the column where overflow begins.
+                    -- If `pos` is already past `pageWidth`, overflow starts at `pos`.
+                    maxwc =
+                        max pageWidth pos
+
+                    -- `a` = how far past pageWidth `pos` already is (0 if pos <= pageWidth).
+                    a =
+                        maxwc - pageWidth
+
+                    -- `b` = the additional overflow contributed by this text token.
+                    b =
+                        stop - maxwc
+                in
+                -- Squared overflow formula: b*(2a+b) = (a+b)^2 - a^2, i.e. the
+                -- increase in total squared overflow when the column advances from
+                -- (pageWidth + a) to (pageWidth + a + b).
+                { badness = b * (2 * a + b)
+                , columnOverflow = 0
+                , height = 0
+                }
+
+            else
+                { badness = 0
+                , columnOverflow = 0
+                , height = 0
+                }
+
+        newlineCost _ =
+            -- The indentation level does not affect cost in the default
+            -- factory; only the newline itself (one extra line) is counted.
+            { badness = 0
+            , columnOverflow = 0
+            , height = 1
+            }
+
+        combine c1 c2 =
+            { badness = c1.badness + c2.badness
+            , columnOverflow = c1.columnOverflow + c2.columnOverflow
+            , height = c1.height + c2.height
+            }
+
+        le c1 c2 =
+            -- Lexicographic comparison: badness first, then columnOverflow,
+            -- then height.
+            if c1.badness < c2.badness then
+                True
+
+            else if c1.badness > c2.badness then
+                False
+
+            else if c1.columnOverflow < c2.columnOverflow then
+                True
+
+            else if c1.columnOverflow > c2.columnOverflow then
+                False
+
+            else
+                c1.height <= c2.height
+
+        twoColumnsOverflow w =
+            -- Charge both a column overflow penalty and one extra line.
+            -- The height charge discourages the printer from placing the
+            -- separator so far left that every left cell overflows.
+            { badness = 0
+            , columnOverflow = w
+            , height = 1
+            }
+
+        twoColumnsBias _ =
+            -- No bias cost in the default factory.
+            { badness = 0
+            , columnOverflow = 0
+            , height = 0
+            }
+
+        stringOfCost c =
+            "("
+                ++ String.fromInt c.badness
+                ++ " "
+                ++ String.fromInt c.columnOverflow
+                ++ " "
+                ++ String.fromInt c.height
+                ++ ")"
+    in
+    { text = textCost
+    , newline = newlineCost
+    , combine = combine
+    , le = le
+    , twoColumnsBias = twoColumnsBias
+    , twoColumnsOverflow = twoColumnsOverflow
+    , limit = limit_
+    , stringOfCost = stringOfCost
+    , debugFormat = makeDebugFormat pageWidth
+    }
+
+
+
+-- ============================================================
+-- Debug formatting
+-- ============================================================
+
+
+{-| Produce a debug string from a rendered document.
+
+The output has four parts:
+
+1. A column ruler: the digits 1-9, 0, 1-9, 0, ... up to `pageWidth` columns.
+2. The rendered content, with each line padded (or truncated) to `pageWidth`
+   and a `|` marker appended. Lines longer than `pageWidth` have the marker
+   inserted at the overflow point, with the overflow shown to the right.
+3. `is_tainted: true` or `is_tainted: false`.
+4. `cost: <stringOfCost output>`.
+
+Example for `pageWidth = 10`:
+
+    1234567890
+    Hello!    |
+    World     |
+
+    is_tainted: false
+    cost: (0 0 1)
+
+This function is used as the `debugFormat` field of `defaultCostFactory` but
+can also be called directly or adapted for custom cost factories.
+
+-}
+makeDebugFormat : Int -> String -> Bool -> String -> String
+makeDebugFormat pageWidth content isTainted cost =
+    let
+        header =
+            Array.range 1 pageWidth
+                |> Array.map (\i -> String.fromInt (Math.modBy 10 i))
+                |> String.join ""
+
+        formatLine l =
+            let
+                len =
+                    String.count l
+            in
+            if len > pageWidth then
+                -- Line overflows: insert the marker at the overflow point.
+                String.takeFirst pageWidth l ++ "|" ++ String.dropFirst pageWidth l
+
+            else
+                -- Line fits: pad to pageWidth then append the marker.
+                l ++ String.repeat (pageWidth - len) " " ++ "|"
+
+        formattedContent =
+            String.split "\n" content
+                |> Array.map formatLine
+                |> String.join "\n"
+
+        taintedStr =
+            if isTainted then
+                "true"
+
+            else
+                "false"
+    in
+    header
+        ++ "\n"
+        ++ formattedContent
+        ++ "\n\nis_tainted: "
+        ++ taintedStr
+        ++ "\ncost: "
+        ++ cost

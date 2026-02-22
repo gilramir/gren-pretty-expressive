@@ -1,0 +1,173 @@
+module OCamlTests exposing (..)
+
+import Expect exposing (Expectation)
+import Test exposing (..)
+
+import PrettyExpressive as P
+
+{- These are the translated unit tests from OCaml, from this file:
+    https://github.com/sorawee/pretty-expressive-ocaml/blob/main/test/main.ml
+    related to the S-expressions.
+-}
+
+-- ============================================================
+-- S-expression pretty printer
+-- ============================================================
+-- A simple S-expression type, mirroring the OCaml test fixture.
+
+type Sexp
+    = Atom String
+    | SexpList (Array Sexp)
+
+
+{- Convert a Sexp to a Doc.
+
+   Three layout styles are offered as a `choice`:
+
+     Horizontal  (a b c d)
+     Vertical    (a        --- each element on its own line, indented by 1
+                  b
+                  c
+                  d)
+     Arg-list    (a b      --- first two elements on the first line;
+                    c        remaining elements below the second,
+                    d)       aligned to where the second starts
+
+   The printer picks whichever style has the lowest cost for the page width
+   in use.  `acat` (aligned-concat with spaces) builds the horizontal layout;
+   `vcat` builds the vertical one; the arg-list style is assembled by hand.
+
+   In the OCaml source `<+>` is aligned concat (left-associative), so
+   `x <+> y <+> z` = `alignedConcat (alignedConcat x y) z`.
+-}
+prettySexp : Sexp -> P.Doc cost
+prettySexp sexp =
+    let
+        -- Horizontal concatenation: fold with "aligned-concat through a space".
+        -- Left-associative, matching the OCaml `fold_doc (fun x y -> x <+> space <+> y)`.
+        acat docs =
+            P.foldDoc (\a b -> P.alignedConcat (P.alignedConcat a P.space) b) docs
+    in
+    when sexp is
+        Atom str ->
+            P.text str
+
+        SexpList arr ->
+            when Array.popFirst arr is
+                Nothing ->
+                    -- Empty list: "()"
+                    P.concat P.lparen P.rparen
+
+                Just { first = x, rest = xs } ->
+                    when Array.popFirst xs is
+                        Nothing ->
+                            -- Single element: "(x)"
+                            P.alignedConcat (P.alignedConcat P.lparen (prettySexp x)) P.rparen
+
+                        Just _ ->
+                            -- Two or more elements: offer three layout styles.
+                            let
+                                xDoc     = prettySexp x
+                                xsDocs   = Array.map prettySexp xs
+                                allDocs  = [ xDoc ] ++ xsDocs
+
+                                -- Style 1: everything on one line --- "(a b c d)"
+                                horizStyle   = acat allDocs
+
+                                -- Style 2: each element on its own line --- "(a\n b\n c\n d)"
+                                vertStyle    = P.vcat allDocs
+
+                                -- Style 3: first element + second on line 1,
+                                --           rest aligned under the second --- "(a b\n   c\n   d)"
+                                argListStyle = P.alignedConcat (P.alignedConcat xDoc P.space) (P.vcat xsDocs)
+
+                                -- Offer all three; the printer picks the cheapest.
+                                -- Mirrors OCaml's left-associative <|>:
+                                --   (horiz <|> vert) <|> argList
+                                body = P.choice (P.choice horizStyle vertStyle) argListStyle
+                            in
+                            -- Wrap in parens with aligned concat, so inner newlines
+                            -- indent to the column just after the opening "(".
+                            P.alignedConcat (P.alignedConcat P.lparen body) P.rparen
+
+
+-- The example S-expression used in all three tests:  (a b c d)
+exampleSexp : Sexp
+exampleSexp =
+    SexpList [ Atom "a", Atom "b", Atom "c", Atom "d" ]
+
+
+suite : Test
+suite =
+    describe "Unit tests from OCaml implementation"
+
+
+        -- ============================================================
+        -- S-expression tests
+        -- (ported from the OCaml test suite, "sexp" group)
+        -- ============================================================
+        -- Each test renders the same four-atom S-expression (a b c d)
+        -- at a different page width and checks that the printer selects
+        -- the expected layout style.
+
+        [ describe "sexp"
+
+            [ test "sexp w=4: vertical layout --- all atoms on separate lines" <|
+                \_ ->
+                    -- At w=4 the horizontal form "(a b c d)" (9 chars) overflows
+                    -- badly, and the arg-list form "(a b\n   c\n   d)" has
+                    -- "   d)" = 5 chars which also overflows.  The vertical form
+                    -- "(a\n b\n c\n d)" keeps every line within 4 chars and wins.
+                    --
+                    --   (a
+                    --    b
+                    --    c
+                    --    d)
+                    let
+                        cf4 = P.defaultCostFactory { pageWidth = 4, computationWidth = Nothing }
+                        expected = "(a\n b\n c\n d)"
+                        maybeActual = P.prettyFormat cf4 (prettySexp exampleSexp)
+                    in
+                    when maybeActual is
+                        Nothing     -> Expect.fail "document failed to render"
+                        Just actual -> Expect.equal expected actual
+
+            , test "sexp w=6: arg-list layout --- second atom starts line 1, rest aligned below" <|
+                \_ ->
+                    -- At w=6 the horizontal form still overflows (9 > 6).
+                    -- The vertical form fits (max line = " d)" = 3 chars) but costs
+                    -- 3 newlines (height = 3).
+                    -- The arg-list form "(a b\n   c\n   d)" has max line "   d)" =
+                    -- 5 chars which fits in 6, and costs only 2 newlines --- cheaper.
+                    --
+                    --   (a b
+                    --      c
+                    --      d)
+                    let
+                        cf6 = P.defaultCostFactory { pageWidth = 6, computationWidth = Nothing }
+                        expected = "(a b\n   c\n   d)"
+                        maybeActual = P.prettyFormat cf6 (prettySexp exampleSexp)
+                    in
+                    when maybeActual is
+                        Nothing     -> Expect.fail "document failed to render"
+                        Just actual -> Expect.equal expected actual
+
+            , test "sexp w=10: horizontal layout --- everything on one line" <|
+                \_ ->
+                    -- At w=10 the horizontal form "(a b c d)" is 9 chars which fits,
+                    -- costs zero badness and zero height, and dominates both other
+                    -- options.
+                    --
+                    --   (a b c d)
+                    let
+                        cf10 = P.defaultCostFactory { pageWidth = 10, computationWidth = Nothing }
+                        expected = "(a b c d)"
+                        maybeActual = P.prettyFormat cf10 (prettySexp exampleSexp)
+                    in
+                    when maybeActual is
+                        Nothing     -> Expect.fail "document failed to render"
+                        Just actual -> Expect.equal expected actual
+
+            ]
+
+        ]

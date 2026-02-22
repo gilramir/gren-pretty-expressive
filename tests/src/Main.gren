@@ -1,0 +1,18 @@
+module Main exposing (main)
+
+import Expect
+import Test exposing (describe, test)
+import Test.Runner.Node exposing (Program, run)
+
+import Constructors
+import OCamlExamples
+import OCamlTests
+
+main : Program
+main =
+    run <|
+        describe "All Tests"
+            [ Constructors.suite
+            , OCamlExamples.suite
+            , OCamlTests.suite
+            ]
