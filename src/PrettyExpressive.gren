@@ -2,6 +2,7 @@ module PrettyExpressive exposing
     ( CostFactory
     , DefaultCostTuple
     , Doc
+    , DocPair
     , Info
     , addCost
     , align
@@ -45,19 +46,11 @@ module PrettyExpressive exposing
     , vcat
     )
 
+{-|
+# Usage
 
-{-| Pretty Expressive Printer for Gren.
-
-A port of the OCaml Pretty Expressive Printer.
-
-Reference: <https://dl.acm.org/doi/abs/10.1145/3622837>
-
-This library implements an *optimal* pretty printer. Given a page-width limit
-and a cost model, it searches all possible layouts and selects the one with
-the lowest cost. Documents are constructed from combinators and rendered with
-`prettyFormat` or `prettyFormatInfo`.
-
-Basic usage:
+Step 1: Implement a CostFactory. PrettyExpressive provides
+a default implementation, but you can implement your own.
 
     import PrettyExpressive as P
 
@@ -65,25 +58,144 @@ Basic usage:
     cf =
         P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
 
-    example : Maybe String
-    example =
-        P.prettyFormat cf
+
+Step 2: Use Doc constructors to create your document.
+
+    document : P.Doc
+    document =
             (P.text "hello" |> P.concat (P.text " world"))
 
-**Gren-specific design note:** The OCaml original used per-node mutable hash
-tables (indexed by `(column, indent)` pairs) to memoise intermediate results,
-and a global counter to assign unique IDs to nodes for sharing detection.
-Neither technique is implemented here in Gren. The omission is unlikely to matter
-for typical documents; only extremely large or heavily shared document trees
-may be noticeably slower.
+Step 3: Use a printing function, usually `prettyFormat`, to render your
+    Doc as a string.
 
+    printed : Maybe String
+    printed =
+        P.prettyFormat cf document
+
+The result from the printing functions is a Maybe String, because technically
+a document may fail to print. This can only happen if the you create your
+document incorrectly.
+
+For any document built from the normal constructors without explicitly
+embedding `failDoc`, `prettyFormat` will always return `Just`. The
+`Nothing` case is only reachable if you deliberately construct an
+unflattenable document *and* then use it as *both* branches of a `choice`,
+which is a document construction error, not something the printer
+decides. The `Nothing` return exists to make that error visible rather
+than silently picking a wrong layout.
+
+In practice, only one thing causes a document to fail: every branch
+of every `choice` in the document must contain a `failDoc` or evaluate
+to one.
+
+# Terminology
+
+## flattening
+
+A document like group (text "foo" |> concat nl |> concat (text "bar"))
+represents two possible renderings:
+
+    foo bar        ← everything on one line
+
+    foo
+    bar            ← broken across lines
+
+"Flat form" just means the one-line version. "Flatten" is the operation
+that transforms a document so that it only knows how to produce the
+one-line version.  What flatten actually does It walks the document tree
+and replaces every newline node with its designated substitute string:
+
+* nl → text " " (the space is the substitute)
+* breakDoc → text "" (empty string is the substitute)
+* hardNl → failDoc (no substitute exists; flattening fails)
+
+Everything else -- concat, nest, align, choice -- is recursed into. The
+indentation-control wrappers (nest, align, reset) are simply dropped,
+because in a flat document there are no newlines and therefore indentation
+is irrelevant.
+
+flatten is mostly an implementation detail of group:
+
+    group d = choice d (flatten d)
+
+This says: "offer the printer a choice between the original document d
+(which may have real newlines) and `flatten d` (which has all newlines
+replaced with their substitutes)." The printer evaluates both and picks
+whichever costs less — typically the flat version if it fits on the
+page, the broken version if it doesn't.  You would rarely call flatten
+directly. The main case where you would is `flattenAlignedConcat` and `hcat`,
+where the left operand is explicitly flattened to guarantee it stays on
+one line before being aligned-concatenated with the right operand.
+
+
+# The CostFactory
+
+## Types
+@docs CostFactory
+@docs DefaultCostTuple
+
+## Functions
+@docs defaultCostFactory
+
+# Documents
+
+## Types
+@docs Doc
+@docs DocPair
+
+## Functions
+@docs addCost
+@docs align
+@docs alignedConcat
+@docs breakDoc
+@docs choice
+@docs comma
+@docs concat
+@docs concat_array
+@docs dquote
+@docs empty
+@docs failDoc
+@docs flattenAlignedConcat
+@docs foldDoc
+@docs group
+@docs hardNl
+@docs hardNlConcat
+@docs hcat
+@docs lbrace
+@docs lbrack
+@docs lparen
+@docs nest
+@docs newline
+@docs nl
+@docs rbrace
+@docs rbrack
+@docs reset
+@docs rparen
+@docs space
+@docs text
+@docs twoColumns
+@docs vcat
+
+# Printing
+
+## Types
+@docs Info
+
+## Functions
+@docs prettyFormat
+@docs prettyFormatAt
+@docs prettyFormatDebug
+@docs prettyFormatDebugAt
+@docs prettyFormatInfo
+@docs prettyFormatInfoAt
+
+# Other Functions
+You aren't likely to use these, except for testing or debugging.
+
+@docs flatten
+@docs makeDebugFormat
 -}
 
--- ============================================================
--- Public types
--- ============================================================
-
-import Debug
 import Math
 
 
@@ -105,7 +217,7 @@ type alias Info cost =
 
 {-| A cost factory defines how printing costs are computed and compared.
 Pass a value of this type to the rendering functions (`prettyFormat` etc.)
-to control the optimisation objective.
+to control the optimization objective.
 
 You can supply your own instance or use `defaultCostFactory`.
 
@@ -169,7 +281,11 @@ type alias DocPair cost =
     }
 
 
-{-| The document type, parameterised by the cost type.
+{-| The document type, parameterized by the cost type.
+
+You can implement the cost to be any type. It is your CostFactory which
+calculates and compares costs. The PrettyExpressive library code doesn't
+use the cost directly.
 
 A `Doc cost` is an *abstract description* of a piece of formatted text. It
 does not contain a concrete string; instead it encodes choices, indentation
@@ -433,14 +549,14 @@ dquote =
 where `a` ended. This "unaligned" semantics makes it straightforward to format
 C-style code where braces, brackets, and parentheses should flow freely.
 
-The smart constructor applies several normalisation rules at build time to keep
+The smart constructor applies several normalization rules at build time to keep
 the document tree compact:
 
   - Either operand being `DocFail` short-circuits to `DocFail`.
   - Either operand being `DocText { width = 0 }` (i.e. `empty`) is dropped.
   - Two adjacent `DocText` nodes are fused into one.
   - A `DocAddCost` on either operand is floated outward, keeping cost
-    annotations above structural nodes. This normalises the tree shape so
+    annotations above structural nodes. This normalizes the tree shape so
     the resolver sees consistent node forms.
 
 -}
@@ -463,7 +579,7 @@ concat d1 d2 =
             DocText { string = (s1 ++ s2), width = w1 + w2 }
 
         -- Float cost annotations outward so that structural nodes are never
-        -- wrapped inside a DocAddCost. This normalises the tree and ensures
+        -- wrapped inside a DocAddCost. This normalizes the tree and ensures
         -- that the resolver sees consistent node shapes.
         { d1 = _, d2 = DocAddCost { cost = c, doc = inner2 } } ->
             addCost c (concat d1 inner2)
@@ -540,7 +656,7 @@ The smart constructor has several pass-through cases where wrapping in
     column; an outer `nest` cannot override that.
   - `DocReset` -- `reset` fixes indentation to 0; same reasoning.
   - `DocText` -- plain text carries no newlines, so indentation is irrelevant.
-  - `DocAddCost` -- float the cost annotation outward (same normalisation as
+  - `DocAddCost` -- float the cost annotation outward (same normalization as
     in `concat`).
 
 -}
@@ -633,7 +749,7 @@ reset d =
 {-| Attach an extra cost `c` to document `d` without changing its layout.
 
 The additional cost is combined with `d`'s ordinary layout cost using
-`CostFactory.combine`. This lets you nudge the optimiser toward or away from
+`CostFactory.combine`. This lets you nudge the optimizer toward or away from
 specific layouts when the default cost model does not capture your preferences
 precisely.
 
@@ -831,7 +947,7 @@ hcat =
 {-| Two-column table layout for an array of `{ a, b }` document pairs.
 
 The printer searches for the optimal *column separator* -- the column at which
-the right (`b`) cells begin -- and picks the position that minimises total cost
+the right (`b`) cells begin -- and picks the position that minimizes total cost
 across all rows simultaneously.
 
 Each row is rendered as:
@@ -1663,7 +1779,7 @@ prettyFormatDebugAt cf initC d =
 {-| The cost record used by `defaultCostFactory`.
 
   - `badness` -- sum of squared overflows past the page width. Squaring means
-    one large overflow is penalised more heavily than several small ones, which
+    one large overflow is penalized more heavily than several small ones, which
     steers the printer toward layouts where overflows are spread evenly when
     they cannot be avoided entirely.
   - `columnOverflow` -- sum of overflows past column separators in `twoColumns`
@@ -1691,7 +1807,7 @@ type alias DefaultCostTuple =
     printer stops maintaining the full candidate set.
 
 **Cost ordering:** Costs are compared lexicographically -- `badness` is
-minimised first, then `columnOverflow`, then `height`. The printer will
+minimized first, then `columnOverflow`, then `height`. The printer will
 always prefer a layout that fits within the page width (even at the cost of
 more newlines), and among equally bad layouts it prefers fewer column
 overflows, then fewer newlines.
