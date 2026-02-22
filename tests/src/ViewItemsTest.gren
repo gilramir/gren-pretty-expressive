@@ -1,0 +1,123 @@
+module ViewItemsTest exposing (..)
+
+import Expect
+import Test exposing (..)
+
+import PrettyExpressive as P
+
+
+{-| Tests for pretty-printing a Gren function that uses the pipeline operator.
+
+It is inspired by the sample code on the Gren home page
+at https://gren-lang.org/
+
+The target output is:
+
+    viewItems : Array String -> String
+    viewItems items =
+        items
+            |> Array.sort
+            |> String.join ", "
+
+The document structure mirrors the syntactic structure of the source:
+
+  - The type signature and definition line are joined by a hard newline.
+  - The function body is wrapped in `nest 4`, so newlines inside it indent
+    to column 4.
+  - The pipeline steps are wrapped in a further `nest 4` (total indent 8),
+    so their newlines indent to column 8.
+  - All newlines are `hardNl` — the layout is fixed regardless of page width.
+
+-}
+suite : Test
+suite =
+    let
+        cf80 : P.CostFactory P.DefaultCostTuple
+        cf80 =
+            P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+    in
+    describe "viewItems pretty printer"
+        [ test "renders the full function at 80 columns" <|
+            \_ ->
+                let
+                    -- --------------------------------------------------------
+                    -- Pipeline steps: the |> lines, each indented 4 more than
+                    -- the `items` line (so 8 total from the left margin).
+                    --
+                    --         |> Array.sort
+                    --         |> String.join ", "
+                    --
+                    -- `vcat` joins the two step texts with a single hard newline.
+                    -- The leading `hardNl` before the first step is what creates
+                    -- the line break between `items` and `|> Array.sort`.
+                    -- `nest 4` sets i = 4 + 4 = 8, so all newlines here indent
+                    -- to 8 spaces.
+                    pipelineSteps : P.Doc P.DefaultCostTuple
+                    pipelineSteps =
+                        P.nest 4
+                            (P.concat P.hardNl
+                                (P.vcat
+                                    [ P.text "|> Array.sort"
+                                    , P.text "|> String.join \", \""
+                                    ]
+                                )
+                            )
+
+                    -- --------------------------------------------------------
+                    -- Function body: `items` followed by the pipeline steps.
+                    --
+                    --     items
+                    --         |> Array.sort
+                    --         |> String.join ", "
+                    --
+                    -- The leading `hardNl` creates the break after `=`.
+                    -- `nest 4` sets i = 4, so this first newline indents to 4.
+                    functionBody : P.Doc P.DefaultCostTuple
+                    functionBody =
+                        P.nest 4
+                            (P.concat P.hardNl
+                                (P.concat (P.text "items") pipelineSteps)
+                            )
+
+                    -- --------------------------------------------------------
+                    -- Complete function: type signature, definition line, body.
+                    --
+                    --   viewItems : Array String -> String
+                    --   viewItems items =
+                    --       items
+                    --           |> Array.sort
+                    --           |> String.join ", "
+                    --
+                    -- The two top-level hard newlines separate the three sections.
+                    -- `functionBody` begins with its own `hardNl`, so we do not
+                    -- need a separator between the definition line and the body —
+                    -- the body carries its own leading newline.
+                    d : P.Doc P.DefaultCostTuple
+                    d =
+                        P.concat_array
+                            [ P.text "viewItems : Array String -> String"
+                            , P.hardNl
+                            , P.text "viewItems items ="
+                            , functionBody
+                            ]
+
+                    -- --------------------------------------------------------
+                    -- Expected output, written out explicitly so the test is
+                    -- easy to read and verify without running it.
+                    expected : String
+                    expected =
+                        String.join "\n"
+                            [ "viewItems : Array String -> String"
+                            , "viewItems items ="
+                            , "    items"
+                            , "        |> Array.sort"
+                            , "        |> String.join \", \""
+                            ]
+                in
+                when P.prettyFormat cf80 d is
+                    Nothing ->
+                        Expect.fail "document failed to render"
+                    Just actual ->
+                        Expect.equal expected actual
+
+        ]
