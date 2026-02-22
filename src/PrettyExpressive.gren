@@ -70,33 +70,33 @@ your own.
 For writing a pretty printer for a programming language, the essential
 kit comes down to five constructors and one combinator:
 
-**`text`** — the atomic unit. Every keyword, identifier, operator,
+**`text`** -- the atomic unit. Every keyword, identifier, operator,
 literal, and punctuation mark becomes a `text` node. Everything else is
 just about how text nodes get arranged.
 
-**`concat`** — puts two documents next to each other. Every
+**`concat`** -- puts two documents next to each other. Every
 compound structure (expressions, statements, declarations) is built by
 concatenating smaller pieces. It's the only way to join things.
 
-**`nl`** — a line break that flattens to a space. This is the standard
+**`nl`** -- a line break that flattens to a space. This is the standard
 separator for anything that *could* go on one line: between a function
 name and its arguments, between items in a list, between `then` and its
 expression. The printer automatically decides whether to use the space
 or the newline.
 
-**`hardNl`** — a line break that *cannot* be flattened. Used wherever a
+**`hardNl`** -- a line break that *cannot* be flattened. Used wherever a
 newline is mandatory regardless of width: between top-level definitions,
 between statements in a `do` block, after a `{` that opens a multi-line
 body.
 
-**`nest`** — indents the contents of a block. Every `let`, `in`,
+**`nest`** -- indents the contents of a block. Every `let`, `in`,
 `where`, `of`, function body, and case branch needs `nest` to push its
 contents right by the appropriate number of spaces.
 
-**`group`** — the key decision point. `group d` says "try to fit `d`
+**`group`** -- the key decision point. `group d` says "try to fit `d`
 on one line; if it doesn't fit, break it." Almost every place where the
-layout is *optional* — argument lists, record literals, `if-then-else`,
-the arms of a `case` — gets wrapped in `group`.
+layout is *optional* -- argument lists, record literals, `if-then-else`,
+the arms of a `case` -- gets wrapped in `group`.
 
 
 Everything else in the library is either derived from these six
@@ -166,7 +166,7 @@ is irrelevant.
 This says: "offer the printer a choice between the original document d
 (which may have real newlines) and `flatten d` (which has all newlines
 replaced with their substitutes)." The printer evaluates both and picks
-whichever costs less — typically the flat version if it fits on the
+whichever costs less -- typically the flat version if it fits on the
 page, the broken version if it doesn't.  You would rarely call flatten
 directly. The main case where you would is `flattenAlignedConcat` and `hcat`,
 where the left operand is explicitly flattened to guarantee it stays on
@@ -183,6 +183,325 @@ one line before being aligned-concatenated with the right operand.
 @docs defaultCostFactory
 
 # Documents
+
+This section describes every `Doc` variant you can construct, what it renders to,
+how it interacts with `flatten`, and when to use it.
+
+---
+
+## Primitives
+
+### `text s`
+
+Renders the string `s` literally at the current column position.
+`s` must not contain a newline character.
+
+```
+text "hello"  ->  hello
+```
+
+Flattens to itself -- `text` is already "flat".
+
+**Use for** any literal string content: keywords, identifiers, punctuation, numbers.
+
+---
+
+### `empty`
+
+Equivalent to `text ""`. Renders nothing and advances the column by zero.
+
+Useful as a neutral element when building documents with `foldDoc` or as an
+explicit "nothing here" placeholder in conditional logic.
+
+---
+
+### `failDoc`
+
+A document that always **fails to render**.
+
+On its own it causes rendering to return `Nothing`. Its power comes from pairing
+it with `choice`: any branch containing `failDoc` is pruned, so the printer
+falls back to the other branch automatically.
+
+```elm
+-- Always renders "Hades" because the left branch fails
+choice (concat (text "Sea of Stars") failDoc) (text "Hades")
+-- -> Hades
+```
+
+**Use for** marking layouts that are logically impossible or that you explicitly
+want to forbid (e.g. the flattened form of `hardNl`).
+
+---
+
+## Newlines
+
+All newline variants insert a real `\n` followed by indentation spaces
+(the number of spaces equals the current indentation level set by `nest` and
+`align`). They differ only in what they do when `flatten` is applied.
+
+---
+
+### `nl`
+
+A newline that flattens to a single space `" "`.
+
+```
+-- page wide enough to fit on one line:
+flatten (text "Fire Emblem" `concat` nl `concat` text "Awakening")
+-- -> Fire Emblem Awakening
+
+-- page too narrow; newline is kept:
+-- -> Fire Emblem
+--   Awakening
+```
+
+**Use for** the common case of "a space when it fits, a newline when it doesn't" --
+the bread-and-butter of `group`.
+
+---
+
+### `breakDoc`
+
+A newline that flattens to an empty string `""`.
+
+```
+flatten (text "Mario" `concat` breakDoc `concat` text "Bros")
+-- -> MarioBros
+```
+
+**Use for** optional line breaks where no separator is wanted in the flat form,
+e.g. breaking a long identifier at a natural boundary without inserting a space.
+
+---
+
+### `hardNl`
+
+A newline that **cannot be flattened**. Applying `flatten` to any document
+containing `hardNl` produces `failDoc`.
+
+```
+flatten (text "x" `concat` hardNl `concat` text "y")
+-- -> failDoc  (renders as Nothing)
+```
+
+**Use for** mandatory line breaks that must appear regardless of available width --
+e.g. separating top-level definitions, or the newlines between rows built by `vcat`.
+
+---
+
+### `newline (Maybe String)`
+
+The general newline primitive that the three shorthands above are built from.
+
+| Argument | Flattens to |
+|---|---|
+| `Just s` | `text s` |
+| `Nothing` | `failDoc` |
+
+`nl` is `newline (Just " ")`, `breakDoc` is `newline (Just "")`, and
+`hardNl` is `newline Nothing`.
+
+**Use for** custom flat-form separators, e.g. `newline (Just ", ")` to get a
+comma-space when the content fits on one line and a newline otherwise.
+
+---
+
+## Concatenation
+
+### `concat a b`
+
+Appends document `b` immediately after document `a`, **without** aligning `b`
+to the column where `a` ended. The right document flows freely -- it is not
+treated as a rigid box.
+
+```
+let left  = concat (text "Splatoon") (concat nl (text "Nier"))
+let right = concat (text "Automata") (concat nl (text "FEZ"))
+
+concat left right
+-- -> Splatoon
+--   NierAutomata     <- "Nier" and "Automata" are on the same line
+--   FEZ
+```
+
+This "unaligned" behaviour makes `concat` the right tool for C-style code where
+curly braces and brackets should not create rigid indentation.
+
+**Use for** joining any two documents. It is the fundamental building block --
+all other combinators ultimately use it.
+
+---
+
+## Layout choices
+
+### `choice a b`
+
+Lets the printer choose between document `a` and document `b`, picking
+whichever has the lower cost according to the cost factory.
+
+```elm
+-- With a wide page, "Chrono Trigger" fits:
+choice (text "Chrono Trigger") (concat (text "Octopath") (concat nl (text "Traveler")))
+-- -> Chrono Trigger
+
+-- With a narrow page, the two-line version wins:
+-- -> Octopath
+--   Traveler
+```
+
+Both branches are evaluated; `failDoc` branches are pruned automatically.
+When the two options have equal cost the first branch wins.
+
+**Use for** any "try this layout first, fall back to that one" decision.
+`group d` is the most common special case: `choice d (flatten d)`.
+
+---
+
+## Indentation control
+
+### `nest n d`
+
+Increases the indentation level by `n` spaces for the duration of document `d`.
+Only affects where newlines land -- it does not insert spaces immediately.
+
+```
+nest 4 (concat (text "if true:") (concat nl (text "pass")))
+-- -> if true:
+--       pass        <- 4 extra spaces of indent
+```
+
+`nest` has no effect on `text`, `align`, or `reset` nodes at the top level of `d`,
+because those nodes manage their own indentation.
+
+**Use for** block bodies, continuation lines, and any structure where child
+content should be indented relative to its parent.
+
+---
+
+### `align d`
+
+Sets the indentation level to the **current column position** for the duration
+of `d`. This creates a "box" whose left edge is anchored to where it starts.
+
+```
+-- Printing starts at column 11 ("Languages: " is 11 chars):
+concat (text "Languages: ")
+       (align (concat (text "Racket")
+              (concat nl
+              (concat (text "OCaml")
+              (concat nl
+                      (text "Pyret"))))))
+-- -> Languages: Racket
+--              OCaml     <- lined up under "Racket"
+--              Pyret
+```
+
+`align` has no effect on `text`, another `align`, or `reset` at the top level of `d`.
+
+**Use for** hanging indentation, argument lists, and any structure that should
+remain visually aligned to its opening position.
+
+---
+
+### `reset d`
+
+Resets the indentation level to **0** for the duration of `d`.
+
+```
+nest 8 (concat (text "header:") (concat nl (reset (text "body"))))
+-- -> header:
+-- body              <- back at column 0 despite the nest
+```
+
+Like `nest` and `align`, `reset` has no effect on `text`, `align`, or another
+`reset` at the top level of `d`.
+
+**Use for** top-level declarations or other constructs that must always start at
+the left margin, even when they appear inside indented context.
+
+---
+
+## Cost annotation
+
+### `addCost c d`
+
+Renders `d` normally but adds the extra cost `c` to whatever cost `d` incurs.
+Does not change the layout in any way.
+
+```elm
+-- Penalise a particular layout choice by adding a large cost
+addCost (1000, 0, 0) (text "verbose form")
+```
+
+**Use for** nudging the optimiser toward or away from specific layouts when the
+default cost model does not capture your preferences precisely.
+
+---
+
+## Multi-column layout
+
+### `twoColumns (List (Doc, Doc))`
+
+Formats a list of `(left, right)` pairs as an aligned two-column table.
+The printer **searches for the optimal column separator** -- the column at which
+the right side begins -- and picks the position that minimises the total cost.
+
+```
+twoColumns
+  [ (text "empty",     text " :: Doc")
+  , (text "nest",      text " :: Int -> Doc -> Doc")
+  , (text "linebreak", text " :: Doc")
+  ]
+
+-- Wide page:
+-- empty     :: Doc
+-- nest      :: Int -> Doc -> Doc
+-- linebreak :: Doc
+
+-- Narrow page (separator pushed right or rows allowed to overflow):
+-- empty :: Doc
+-- nest  :: Int -> Doc -> Doc
+-- linebreak :: Doc
+```
+
+Two cost-factory hooks govern the search:
+
+- **`twoColumnsOverflow w`** -- charged when a left cell is wider than the
+  chosen separator and overflows into the right column. Typically set higher
+  than the normal overflow cost so the printer prefers going past the page
+  width over clobbering the right column.
+- **`twoColumnsBias w`** -- a small penalty proportional to how far right the
+  separator sits, so that among equally good layouts the tightest (leftmost)
+  separator wins.
+
+A list of one pair degenerates to `align (concat left right)`.
+An empty list degenerates to `empty`.
+Any pair containing `failDoc` causes the whole node to become `failDoc`.
+
+**Use for** type-signature blocks, pattern-match tables, record fields,
+or any structure where vertical alignment across rows matters.
+
+---
+
+## Derived combinators (not Doc constructors, but built from them)
+
+These are not separate `Doc` variants -- they are functions that produce
+ordinary `Doc` trees -- but they are listed here for completeness.
+
+| Combinator | Definition | Use for |
+|---|---|---|
+| `group d` | `choice d (flatten d)` | Try flat; fall back to broken |
+| `flatten d` | Replace newlines with flat alternatives | Force single-line rendering |
+| `alignedConcat a b` | `concat a (align b)` | Aligned ("box") concatenation |
+| `hardNlConcat a b` | `concat a (concat hardNl b)` | Mandatory line between two docs |
+| `flattenAlignedConcat a b` | `alignedConcat (flatten a) b` | Aligned concat with flat left side |
+| `vcat ds` | Fold with `hardNlConcat` | Stack documents vertically |
+| `hcat ds` | Fold with `flattenAlignedConcat` | Stack documents horizontally |
+| `foldDoc f ds` | Left-fold with `f`, identity `empty` | Custom fold over a doc list |
+| `nest n d` | Increase indent by `n` | Block indentation |
+| `reset d` | Set indent to 0 | Top-level declarations |
+| `addCost c d` | Attach extra cost | Fine-tune cost model |
 
 ## Types
 @docs Doc
