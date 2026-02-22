@@ -49,8 +49,10 @@ module PrettyExpressive exposing
 {-|
 # Usage
 
-Step 1: Implement a CostFactory. PrettyExpressive provides
-a default implementation, but you can implement your own.
+## Step 1: Implement a CostFactory.
+
+PrettyExpressive provides a default implementation, but you can implement
+your own.
 
     import PrettyExpressive as P
 
@@ -59,14 +61,57 @@ a default implementation, but you can implement your own.
         P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
 
 
-Step 2: Use Doc constructors to create your document.
+## Step 2: Use Doc constructors to create your document.
 
     document : P.Doc
     document =
             (P.text "hello" |> P.concat (P.text " world"))
 
-Step 3: Use a printing function, usually `prettyFormat`, to render your
-    Doc as a string.
+For writing a pretty printer for a programming language, the essential
+kit comes down to five constructors and one combinator:
+
+**`text`** — the atomic unit. Every keyword, identifier, operator,
+literal, and punctuation mark becomes a `text` node. Everything else is
+just about how text nodes get arranged.
+
+**`concat`** — puts two documents next to each other. Every
+compound structure (expressions, statements, declarations) is built by
+concatenating smaller pieces. It's the only way to join things.
+
+**`nl`** — a line break that flattens to a space. This is the standard
+separator for anything that *could* go on one line: between a function
+name and its arguments, between items in a list, between `then` and its
+expression. The printer automatically decides whether to use the space
+or the newline.
+
+**`hardNl`** — a line break that *cannot* be flattened. Used wherever a
+newline is mandatory regardless of width: between top-level definitions,
+between statements in a `do` block, after a `{` that opens a multi-line
+body.
+
+**`nest`** — indents the contents of a block. Every `let`, `in`,
+`where`, `of`, function body, and case branch needs `nest` to push its
+contents right by the appropriate number of spaces.
+
+**`group`** — the key decision point. `group d` says "try to fit `d`
+on one line; if it doesn't fit, break it." Almost every place where the
+layout is *optional* — argument lists, record literals, `if-then-else`,
+the arms of a `case` — gets wrapped in `group`.
+
+
+Everything else in the library is either derived from these six
+(e.g. `hardNlConcat = concat d (concat hardNl d)`, `vcat = foldDoc
+hardNlConcat`), or handles specialized situations (`align` for hanging
+indentation, `breakDoc` when tokens should touch rather than have a space,
+`twoColumns` for things like `=` alignment in record definitions).
+
+`group` uses `choice`, to decide between the more optimal of two documents.
+The `choice` constructor may be useful in your own specialized situations.
+
+## Step 3: Render the document.
+
+Use a printing function, usually `prettyFormat`, to render your
+Doc as a string.
 
     printed : Maybe String
     printed =
@@ -95,26 +140,26 @@ to one.
 A document like group (text "foo" |> concat nl |> concat (text "bar"))
 represents two possible renderings:
 
-    foo bar        ← everything on one line
+    foo bar        = everything on one line
 
     foo
-    bar            ← broken across lines
+    bar            = broken across lines
 
 "Flat form" just means the one-line version. "Flatten" is the operation
 that transforms a document so that it only knows how to produce the
 one-line version.  What flatten actually does It walks the document tree
 and replaces every newline node with its designated substitute string:
 
-* nl → text " " (the space is the substitute)
-* breakDoc → text "" (empty string is the substitute)
-* hardNl → failDoc (no substitute exists; flattening fails)
+* nl => text " " (the space is the substitute)
+* breakDoc => text "" (empty string is the substitute)
+* hardNl => failDoc (no substitute exists; flattening fails)
 
 Everything else -- concat, nest, align, choice -- is recursed into. The
 indentation-control wrappers (nest, align, reset) are simply dropped,
 because in a flat document there are no newlines and therefore indentation
 is irrelevant.
 
-flatten is mostly an implementation detail of group:
+`flatten` is mostly an implementation detail of group:
 
     group d = choice d (flatten d)
 

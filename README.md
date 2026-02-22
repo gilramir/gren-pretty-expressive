@@ -60,4 +60,4 @@ more as needed:
 * [Haskell](https://github.com/ennocramer/floskell) in the src/Floskell directory
 * [Racket](https://docs.racket-lang.org/pretty-expressive/index.html)
 * [Rust information](https://docs.rs/pretty-expressive/latest/pretty_expressive/)
-* [Rust sources](https://git.midna.dev/mjm/mjl) in the pretty\_expressive directory
+* [Rust sources](https://git.midna.dev/mjm/mjl) in the pretty-expressive directory
