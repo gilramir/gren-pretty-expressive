@@ -1,0 +1,108 @@
+module PrettyExpressive.Debug exposing (debugShowDoc)
+
+import PrettyExpressive as P
+
+{-| Pretty-print the structure of a Doc for debugging.
+Indentation shows nesting depth. DocText is kept on a single line.
+-}
+
+debugShowDoc : P.Doc cost -> String
+debugShowDoc doc =
+    go 0 doc
+
+
+go : Int -> P.Doc cost -> String
+go depth doc =
+    let
+        pad      = String.repeat depth        "    "
+        innerPad = String.repeat (depth + 1)  "    "
+
+        -- Render a record-style constructor with named fields.
+        record name fields =
+            name ++ " {\n"
+            ++ String.join ",\n" (Array.map (\{ k, v } -> innerPad ++ k ++ " = " ++ v) fields)
+            ++ "\n" ++ pad ++ "}"
+
+        -- Render a single-argument constructor whose argument is a Doc,
+        -- shown indented on the next line.
+        wrapper name inner =
+            name ++ " (\n"
+            ++ innerPad ++ go (depth + 1) inner ++ "\n"
+            ++ pad ++ ")"
+
+        -- Render a Doc child (to be placed after a field label on the same line
+        -- as the label — the child itself may span multiple lines downward).
+        child d =
+            go (depth + 1) d
+
+        -- Quote a string for display.
+        quoted s =
+            "\"" ++ s ++ "\""
+
+    in
+    when doc is
+        P.DocFail ->
+            "DocFail"
+
+        P.DocText { string, width } ->
+            "DocText { string = " ++ quoted string ++ ", width = " ++ String.fromInt width ++ " }"
+
+        P.DocNewline Nothing ->
+            "DocNewline Nothing"
+
+        P.DocNewline (Just s) ->
+            "DocNewline (Just " ++ quoted s ++ ")"
+
+        P.DocBlank n ->
+            "DocBlank " ++ String.fromInt n
+
+        P.DocConcat { a, b } ->
+            record "DocConcat"
+                [ { k = "a", v = child a }
+                , { k = "b", v = child b }
+                ]
+
+        P.DocChoice { a, b } ->
+            record "DocChoice"
+                [ { k = "a", v = child a }
+                , { k = "b", v = child b }
+                ]
+
+        P.DocNest { indent = indent, doc = childDoc } ->
+            record "DocNest"
+                [ { k = "indent", v = String.fromInt indent }
+                , { k = "doc",    v = child childDoc }
+                ]
+
+        P.DocAlign inner ->
+            wrapper "DocAlign" inner
+
+        P.DocReset inner ->
+            wrapper "DocReset" inner
+
+        P.DocAddCost { cost = _, doc = childDoc } ->
+            -- The cost value is opaque (no Show constraint), so we omit it.
+            record "DocAddCost"
+                [ { k = "cost", v = "<opaque>" }
+                , { k = "doc",  v = child childDoc }
+                ]
+
+        P.DocContext _ ->
+            -- Functions are not inspectable.
+            "DocContext <fn>"
+
+        P.DocEvaled _ ->
+            -- Already-evaluated measure sets are internal and not printable.
+            "DocEvaled <measures>"
+
+        P.DocTwoColumns pairs ->
+            let
+                pairStr { a, b } =
+                    innerPad ++ "{ a = " ++ child a ++ "\n"
+                    ++ innerPad ++ ", b = " ++ child b ++ "\n"
+                    ++ innerPad ++ "}"
+            in
+            "DocTwoColumns [\n"
+            ++ String.join ("\n" ++ innerPad ++ ",\n") (Array.map pairStr pairs)
+            ++ "\n" ++ pad ++ "]"
+

@@ -6,7 +6,8 @@
     "license": "ISC",
     "version": "1.0.0",
     "exposed-modules": [
-        "PrettyExpressive"
+        "PrettyExpressive",
+        "PrettyExpressive.Debug"
     ],
     "gren-version": "0.6.0 <= v < 0.7.0",
     "dependencies": {
