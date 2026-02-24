@@ -5,9 +5,9 @@ import Test exposing (describe, test)
 import Test.Runner.Node exposing (Program, run)
 
 import Constructors
+import Costs
 import OCamlExamples
 import OCamlTests
-import Regressions
 import ViewItemsTest
 
 main : Program
@@ -15,8 +15,8 @@ main =
     run <|
         describe "All Tests"
             [ Constructors.suite
+            , Costs.suite
             , OCamlExamples.suite
             , OCamlTests.suite
-            , Regressions.suite
             , ViewItemsTest.suite
             ]
