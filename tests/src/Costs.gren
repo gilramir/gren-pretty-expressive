@@ -62,5 +62,77 @@ module Terminal.Parser exposing ( Command(..), parser)
                             Just actual ->
                                 Expect.equal expected actual
 
+            -- ---------------------------------------------------------------
+            -- Three-way choice: exercises mergeLists with a 3-element
+            -- Pareto-optimal set.
+            --
+            -- The processConcat bug only required two non-dominating measures
+            -- to manifest. mergeLists has never been tested with three.  If it
+            -- produced measures in ascending order, prettyFormat would return
+            -- the most expensive layout ("a\nb\nc") instead of the cheapest.
+            --
+            -- Three layouts, all fitting within 80 cols (no overflow cost):
+            --   flat:       "aaaa"    -- last=4, cost=(0,0,0)   <- cheapest
+            --   two-line:   "aa\nbb"  -- last=2, cost=(0,0,1)
+            --   three-line: "a\nb\nc" -- last=1, cost=(0,0,2)   <- most expensive
+            --
+            -- None dominates any other (wider <-> fewer newlines), so all three
+            -- survive into the Pareto set. The printer must return "aaaa".
+            , test "Three non-dominating choices: cheapest (widest) is selected" <|
+                \_ ->
+                    let
+                        flatOpt   = P.text "aaaa"
+                        twoLine   = P.concat (P.text "aa") (P.concat P.hardNl (P.text "bb"))
+                        threeLine = P.vcat [ P.text "a", P.text "b", P.text "c" ]
+
+                        -- choice is left-associative: (flatOpt | twoLine) | threeLine
+                        d = P.choice (P.choice flatOpt twoLine) threeLine
+
+                        maybeActual = P.prettyFormat cf80 d
+                    in
+                        when maybeActual is
+                            Nothing ->
+                                Expect.fail "document failed to render"
+                            Just actual ->
+                                Expect.equal "aaaa" actual
+
+            -- ---------------------------------------------------------------
+            -- Multiple measures on both sides of concat: exercises foldRight
+            -- (2 left measures) together with loop (2 right measures per left).
+            --
+            -- The existing processConcat test has only ONE left measure, so
+            -- foldRight's mergeSets branch has never been reached.  This test
+            -- requires it:
+            --
+            --   left  = group("a" ++ nl ++ "bb")
+            --             -> flat   "a bb"  {last=4, cost=(0,0,0)}
+            --             -> broken "a\nbb" {last=2, cost=(0,0,1)}  <- 2 left measures
+            --
+            --   right = group("c" ++ nl ++ "dd")
+            --             -> produces 2 non-dominating measures for each left context.
+            --
+            -- The cheapest overall layout is flat-left ++ flat-right:
+            --   "a bbc dd"  cost=(0,0,0)
+            --
+            -- If foldRight or loop produced ascending output, mergeLists would
+            -- receive ascending input (it expects descending) and produce a
+            -- garbled result, likely returning "a\nbbc\ndd" or similar.
+            , test "Multiple measures on both sides of concat: cheapest combination is selected" <|
+                \_ ->
+                    let
+                        left  = P.group (P.concat (P.text "a")  (P.concat P.nl (P.text "bb")))
+                        right = P.group (P.concat (P.text "c")  (P.concat P.nl (P.text "dd")))
+                        d     = P.concat left right
+
+                        -- flat left  = "a bb"  (4 chars, zero cost)
+                        -- flat right = "c dd"  (4 chars, starting at col 4, zero cost)
+                        -- concatenated: "a bbc dd"
+                        maybeActual = P.prettyFormat cf80 d
+                    in
+                        when maybeActual is
+                            Nothing ->
+                                Expect.fail "document failed to render"
+                            Just actual ->
+                                Expect.equal "a bbc dd" actual
 
             ]
