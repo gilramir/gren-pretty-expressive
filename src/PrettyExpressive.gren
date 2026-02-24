@@ -1566,12 +1566,12 @@ processConcat cf processLeft ml1 =
                                         -- combination seen so far. Emit `currentBest` to
                                         -- the result when we encounter a combination that
                                         -- costs more (it ends shorter and is not dominated).
+                                        -- Items are appended to `result` in scan order so
+                                        -- the output remains sorted by `last` descending.
                                         loop ms_ result currentBest =
                                             when Array.popFirst ms_ is
                                                 Nothing ->
-                                                    -- Reverse [currentBest] and prepend to
-                                                    -- result to restore descending-last order.
-                                                    Array.reverse [ currentBest ] ++ result
+                                                    result ++ [ currentBest ]
 
                                                 Just { first = m, rest = rest } ->
                                                     let
@@ -1587,7 +1587,7 @@ processConcat cf processLeft ml1 =
                                                     else
                                                         -- `currentBest` is not dominated;
                                                         -- emit it and move on.
-                                                        loop rest ([ currentBest ] ++ result) current
+                                                        loop rest (result ++ [ currentBest ]) current
                                     in
                                     Measures (loop ms2 [] (appendMeasures cf m1 m2))
 

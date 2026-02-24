@@ -45,7 +45,7 @@ They are the most important:
 * nest
 * group
 
-In the article, the CostFactory has a very small, simple itnerface.
+In the article, the CostFactory has a very small, simple interface.
 
 The OCaml implementation provides many more constructors, and its CostFactory
 has a much more complicated interfae, to support these new constructors.
