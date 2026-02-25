@@ -1,4 +1,4 @@
-# Pretty Expressive Printer for Gren
+# Pretty Expressive Printer
 
 A Gren implementation of the Pretty Expressive Printer, ported
 from the OCaml implementation.
@@ -48,12 +48,11 @@ They are the most important:
 In the article, the CostFactory has a very small, simple interface.
 
 The OCaml implementation provides many more constructors, and its CostFactory
-has a much more complicated interfae, to support these new constructors.
+has a much more complicated interface, to support these new constructors.
 This Gren package provides all the same constructors as the OCaml version does, and
 has the same more-complicated CostFactory interface.
 
-This Gren package also adds another helper constructor, and is open to adding
-more as needed:
+This Gren package also adds another constructor, for convenience:
 * concat\_array
 
 # References
