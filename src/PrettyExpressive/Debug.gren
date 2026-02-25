@@ -1,9 +1,29 @@
 module PrettyExpressive.Debug exposing (debugShowDoc)
 
+{-| This package provides a function to help debug
+the Doc that you create.
+
+@docs debugShowDoc
+-}
+
 import PrettyExpressive as P
 
 {-| Pretty-print the structure of a Doc for debugging.
 Indentation shows nesting depth. DocText is kept on a single line.
+
+The output will show the tree of Doc values like this:
+
+    DocConcat {
+        a = DocText { string = "viewItems : Array String -> String", width = 34 },
+        b = DocConcat {
+            a = DocNewline Nothing,
+            b = DocConcat {
+                a = DocText { string = "viewItems items =", width = 17 },
+                ... the rest is not shown
+            }
+        }
+    }
+
 -}
 
 debugShowDoc : P.Doc cost -> String
