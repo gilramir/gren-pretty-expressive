@@ -4,7 +4,7 @@
     "name": "gilramir/gren-pretty-expressive",
     "summary": "An implementation of the Pretty Expressive Printer for pretty-printing code",
     "license": "ISC",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "exposed-modules": [
         "PrettyExpressive",
         "PrettyExpressive.Debug"
