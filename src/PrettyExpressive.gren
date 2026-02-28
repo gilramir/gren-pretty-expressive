@@ -955,33 +955,18 @@ concat d1 d2 =
             DocConcat { a = d1, b = d2 }
 
 
-{-| Concatenate an array of documents right-associatively.
+{-| Concatenate an array of documents. This is a helper function
+to avoid having to call `concat` many times.
 
     concat_array [ a, b, c, d ]
-        == concat a (concat b (concat c d))
+        == concat (concat (concat a b) c) d
 
-Right-associativity matches the natural reading order and avoids building a
-left-leaning tree that would require deep recursion to resolve. An empty array
-returns `empty`; a singleton array returns its sole element unchanged.
-
+    which renders the same as
+           concat a (concat b (concat c d))
 -}
 concat_array : Array (Doc cost) -> Doc cost
 concat_array docs =
-    when Array.popFirst docs is
-        -- Empty array: return the identity element.
-        Nothing ->
-            empty
-
-        Just { first = adoc, rest = after_a } ->
-            when Array.popFirst after_a is
-                -- Singleton: nothing to concatenate.
-                Nothing ->
-                    adoc
-
-                -- Two or more elements: prepend `adoc` and recurse on the tail.
-                Just _ ->
-                    concat adoc (concat_array after_a)
-
+    foldDoc concat docs
 
 {-| Choose between two document layouts; the printer picks the cheaper one.
 
