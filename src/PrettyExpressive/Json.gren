@@ -1,0 +1,136 @@
+module PrettyExpressive.Json exposing (docToJson)
+
+{-| Serialize a `Doc` tree to a compact JSON string for debugging or interop.
+
+@docs docToJson
+-}
+
+import PrettyExpressive as P
+
+
+{-| Convert a `Doc cost` to a compact JSON string.
+
+Each `Doc` variant is encoded as a JSON object with a `"type"` field:
+
+  - `DocFail`       → `{"type":"fail"}`
+  - `DocText`       → `{"type":"text","string":"...","width":N}`
+  - `DocNewline`    → `{"type":"newline","flatForm":"..."}` or `{"type":"newline","flatForm":null}`
+  - `DocConcat`     → `{"type":"concat","a":{...},"b":{...}}`
+  - `DocChoice`     → `{"type":"choice","a":{...},"b":{...}}`
+  - `DocNest`       → `{"type":"nest","indent":N,"doc":{...}}`
+  - `DocAlign`      → `{"type":"align","doc":{...}}`
+  - `DocReset`      → `{"type":"reset","doc":{...}}`
+  - `DocAddCost`    → `{"type":"addCost","doc":{...}}` (cost value is opaque and omitted)
+  - `DocTwoColumns` → `{"type":"twoColumns","rows":[{"a":{...},"b":{...}},...] }`
+  - `DocBlank`      → `{"type":"blank","width":N}` (internal renderer node)
+  - `DocContext`    → `{"type":"context"}` (internal renderer node; function not inspectable)
+  - `DocEvaled`     → `{"type":"evaled"}` (internal renderer node; measures not inspectable)
+
+String values are JSON-escaped: `\` and `"` are escaped, and the control
+characters `\n`, `\r`, and `\t` are replaced with their JSON escape sequences.
+
+-}
+docToJson : P.Doc cost -> String
+docToJson doc =
+    go doc
+
+
+go : P.Doc cost -> String
+go doc =
+    when doc is
+        P.DocFail ->
+            "{\"type\":\"fail\"}"
+
+        P.DocText { string = s, width = w } ->
+            "{\"type\":\"text\",\"string\":"
+                ++ jsonString s
+                ++ ",\"width\":"
+                ++ String.fromInt w
+                ++ "}"
+
+        P.DocNewline Nothing ->
+            "{\"type\":\"newline\",\"flatForm\":null}"
+
+        P.DocNewline (Just s) ->
+            "{\"type\":\"newline\",\"flatForm\":"
+                ++ jsonString s
+                ++ "}"
+
+        P.DocBlank n ->
+            "{\"type\":\"blank\",\"width\":"
+                ++ String.fromInt n
+                ++ "}"
+
+        P.DocConcat { a = d1, b = d2 } ->
+            "{\"type\":\"concat\",\"a\":"
+                ++ go d1
+                ++ ",\"b\":"
+                ++ go d2
+                ++ "}"
+
+        P.DocChoice { a = d1, b = d2 } ->
+            "{\"type\":\"choice\",\"a\":"
+                ++ go d1
+                ++ ",\"b\":"
+                ++ go d2
+                ++ "}"
+
+        P.DocNest { indent = n, doc = inner } ->
+            "{\"type\":\"nest\",\"indent\":"
+                ++ String.fromInt n
+                ++ ",\"doc\":"
+                ++ go inner
+                ++ "}"
+
+        P.DocAlign inner ->
+            "{\"type\":\"align\",\"doc\":"
+                ++ go inner
+                ++ "}"
+
+        P.DocReset inner ->
+            "{\"type\":\"reset\",\"doc\":"
+                ++ go inner
+                ++ "}"
+
+        P.DocAddCost { cost = _, doc = inner } ->
+            "{\"type\":\"addCost\",\"doc\":"
+                ++ go inner
+                ++ "}"
+
+        P.DocContext _ ->
+            "{\"type\":\"context\"}"
+
+        P.DocEvaled _ ->
+            "{\"type\":\"evaled\"}"
+
+        P.DocTwoColumns pairs ->
+            "{\"type\":\"twoColumns\",\"rows\":"
+                ++ jsonArray (Array.map pairToJson pairs)
+                ++ "}"
+
+
+pairToJson : P.DocPair cost -> String
+pairToJson { a = d1, b = d2 } =
+    "{\"a\":"
+        ++ go d1
+        ++ ",\"b\":"
+        ++ go d2
+        ++ "}"
+
+
+jsonArray : Array String -> String
+jsonArray items =
+    "[" ++ String.join "," items ++ "]"
+
+
+jsonString : String -> String
+jsonString s =
+    "\""
+        ++ (s
+                |> String.split "\\" |> String.join "\\\\"
+                |> String.split "\"" |> String.join "\\\""
+                |> String.split "\n" |> String.join "\\n"
+                |> String.split "\r" |> String.join "\\r"
+                |> String.split "\t" |> String.join "\\t"
+           )
+        ++ "\""

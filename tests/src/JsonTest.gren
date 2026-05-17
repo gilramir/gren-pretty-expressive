@@ -1,0 +1,107 @@
+module JsonTest exposing (..)
+
+import Expect
+import Test exposing (..)
+
+import PrettyExpressive as P
+import PrettyExpressive.Json as J
+
+
+suite : Test
+suite =
+    describe "docToJson"
+        [ test "fail" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"fail\"}"
+                    (J.docToJson P.failDoc)
+
+        , test "empty" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"text\",\"string\":\"\",\"width\":0}"
+                    (J.docToJson P.empty)
+
+        , test "text" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"text\",\"string\":\"hello\",\"width\":5}"
+                    (J.docToJson (P.text "hello"))
+
+        , test "nl" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"newline\",\"flatForm\":\" \"}"
+                    (J.docToJson P.nl)
+
+        , test "hardNl" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"newline\",\"flatForm\":null}"
+                    (J.docToJson P.hardNl)
+
+        , test "breakDoc" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"newline\",\"flatForm\":\"\"}"
+                    (J.docToJson P.breakDoc)
+
+        , test "concat" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"concat\",\"a\":{\"type\":\"newline\",\"flatForm\":\" \"},\"b\":{\"type\":\"text\",\"string\":\"x\",\"width\":1}}"
+                    (J.docToJson (P.concat P.nl (P.text "x")))
+
+        , test "choice" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"choice\",\"a\":{\"type\":\"newline\",\"flatForm\":\" \"},\"b\":{\"type\":\"text\",\"string\":\"x\",\"width\":1}}"
+                    (J.docToJson (P.choice P.nl (P.text "x")))
+
+        , test "nest" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"nest\",\"indent\":4,\"doc\":{\"type\":\"newline\",\"flatForm\":\" \"}}"
+                    (J.docToJson (P.nest 4 P.nl))
+
+        , test "align" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"align\",\"doc\":{\"type\":\"newline\",\"flatForm\":\" \"}}"
+                    (J.docToJson (P.align P.nl))
+
+        , test "reset" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"reset\",\"doc\":{\"type\":\"newline\",\"flatForm\":\" \"}}"
+                    (J.docToJson (P.reset P.nl))
+
+        , test "addCost" <|
+            \_ ->
+                let
+                    cost = { badness = 1, columnOverflow = 0, height = 0 }
+                in
+                Expect.equal
+                    "{\"type\":\"addCost\",\"doc\":{\"type\":\"newline\",\"flatForm\":\" \"}}"
+                    (J.docToJson (P.addCost cost P.nl))
+
+        , test "twoColumns" <|
+            \_ ->
+                Expect.equal
+                    "{\"type\":\"twoColumns\",\"rows\":[{\"a\":{\"type\":\"text\",\"string\":\"x\",\"width\":1},\"b\":{\"type\":\"text\",\"string\":\"y\",\"width\":1}},{\"a\":{\"type\":\"text\",\"string\":\"aa\",\"width\":2},\"b\":{\"type\":\"text\",\"string\":\"bb\",\"width\":2}}]}"
+                    (J.docToJson
+                        (P.twoColumns
+                            [ { a = P.text "x", b = P.text "y" }
+                            , { a = P.text "aa", b = P.text "bb" }
+                            ]
+                        )
+                    )
+
+        , test "string escaping: double-quote in flatForm" <|
+            \_ ->
+                -- The flat form value is x"y (3 chars). In JSON the double-quote
+                -- must be escaped as \", producing {"type":"newline","flatForm":"x\"y"}.
+                Expect.equal
+                    "{\"type\":\"newline\",\"flatForm\":\"x\\\"y\"}"
+                    (J.docToJson (P.newline (Just "x\"y")))
+        ]
