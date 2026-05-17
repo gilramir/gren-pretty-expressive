@@ -2,5 +2,5 @@
 
 set -e
 
-gren make Main --output=run-tests
-node run-tests
+gren make Main --output=app
+node app
