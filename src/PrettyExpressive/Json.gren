@@ -108,6 +108,15 @@ go doc =
                 ++ jsonArray (Array.map pairToJson pairs)
                 ++ "}"
 
+        P.DocShared { id, doc = inner, nlCnt } ->
+            "{\"type\":\"shared\",\"id\":"
+                ++ String.fromInt id
+                ++ ",\"nlCnt\":"
+                ++ String.fromInt nlCnt
+                ++ ",\"doc\":"
+                ++ go inner
+                ++ "}"
+
 
 pairToJson : P.DocPair cost -> String
 pairToJson { a = d1, b = d2 } =

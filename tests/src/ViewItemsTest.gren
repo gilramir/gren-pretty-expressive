@@ -4,6 +4,7 @@ import Expect
 import Test exposing (..)
 
 import PrettyExpressive as P
+import PrettyExpressive.Builder as B
 
 
 {-| Tests for pretty-printing a Gren function that uses the pipeline operator.
@@ -114,7 +115,7 @@ suite =
                             , "        |> String.join \", \""
                             ]
                 in
-                when P.prettyFormat cf80 d is
+                when P.prettyFormat cf80 (B.return d) is
                     Nothing ->
                         Expect.fail "document failed to render"
                     Just actual ->

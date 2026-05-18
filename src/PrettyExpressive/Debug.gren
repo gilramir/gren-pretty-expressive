@@ -126,3 +126,10 @@ go depth doc =
             ++ String.join ("\n" ++ innerPad ++ ",\n") (Array.map pairStr pairs)
             ++ "\n" ++ pad ++ "]"
 
+        P.DocShared { id, doc = childDoc, nlCnt } ->
+            record "DocShared"
+                [ { k = "id",    v = String.fromInt id }
+                , { k = "nlCnt", v = String.fromInt nlCnt }
+                , { k = "doc",   v = child childDoc }
+                ]
+

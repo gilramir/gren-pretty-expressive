@@ -11,6 +11,7 @@ the lowest cost. Documents are constructed from combinators and rendered with
 Basic usage:
 
     import PrettyExpressive as P
+    import PrettyExpressive.Builder as B
 
     -- Create a CostFactory, for measuring optimality ("prettiness")
     cf : P.CostFactory P.DefaultCostTuple
@@ -18,22 +19,38 @@ Basic usage:
         P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
 
     -- Create the document (sequences of pretty-printing directives)
-    document : P.Doc
+    document : P.Doc cost
     document =
-            (P.text "hello" |> P.concat (P.text " world"))
+        P.text "hello" |> P.concat (P.text " world")
 
-    -- Render the document to a String
+    -- Render the document to a String. Entry points take a `Builder`;
+    -- wrap a pure Doc with `B.return` when sharing is not needed.
     printed : Maybe String
     printed =
-        P.prettyFormat cf document
+        P.prettyFormat cf (B.return document)
 
-**Gren-specific design note:** The OCaml original used per-node mutable hash
-tables (indexed by `(column, indent)` pairs) to memoize intermediate results,
-and a global counter to assign unique IDs to nodes for sharing detection.
-Neither technique is implemented here in Gren, as it greatly increases
-the complexity of the code. The omission is unlikely to matter
-for typical documents; only extremely large or heavily shared document trees
-may be noticeably slower.
+**Sharing sub-documents:** When the same sub-document is referenced from
+multiple parents — typically two branches of a `choice` — the renderer can
+resolve it once per `(column, indent)` position and reuse the result.
+OCaml gets this for free from value identity; Gren has no equivalent, so
+sharing is opt-in via `share`. `share : Doc cost -> Builder (Doc cost)`
+stamps a unique id onto a sub-document; every reference participates in
+the renderer's memo cache.
+
+    sharedExample : B.Builder (P.Doc P.DefaultCostTuple)
+    sharedExample =
+        P.share (P.text "exit();")
+            |> B.map
+                (\exitD ->
+                    -- Two references → one resolution per (c, i).
+                    P.choice
+                        (P.concat P.space exitD)
+                        (P.nest 4 (P.concat P.nl exitD))
+                )
+
+For documents with no repeated sub-trees, `B.return document` is all you
+need and the renderer behaves identically to a tree walk. See the docs in
+`PrettyExpressive` for the full Builder API and when sharing pays off.
 
 # Notes
 

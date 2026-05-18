@@ -1,0 +1,128 @@
+module PrettyExpressive.Builder exposing
+    ( Builder
+    , State
+    , andThen
+    , freshState
+    , map
+    , return
+    , run
+    , runWith
+    , withFreshId
+    )
+
+{-| A small state-passing monad used to thread a fresh-id counter through
+document construction.
+
+The Builder is only needed when a document contains a shared sub-tree (see
+`PrettyExpressive.share`). The renderer's memoization cache keys on the
+share id, so each `share` call must produce a node with a unique id.
+
+For documents without sharing, callers can use `return` to lift a pure
+`Doc cost` value into a `Builder (Doc cost)` at the entry-point boundary.
+
+@docs Builder
+@docs State
+
+# Building
+@docs return
+@docs map
+@docs andThen
+@docs withFreshId
+
+# Running
+@docs run
+@docs runWith
+@docs freshState
+-}
+
+
+{-| Internal state carried through a `Builder`. The only field is the next
+share id to hand out. Exposed (as an opaque alias) so callers can plumb the
+state through nested runs if needed.
+-}
+type alias State =
+    { nextId : Int
+    }
+
+
+{-| Initial state with `nextId = 0`.
+-}
+freshState : State
+freshState =
+    { nextId = 0 }
+
+
+{-| A computation that produces an `a` while threading the id-counter state.
+-}
+type Builder a
+    = Builder (State -> { state : State, value : a })
+
+
+{-| Lift a pure value into a `Builder`. The state is passed through unchanged.
+-}
+return : a -> Builder a
+return v =
+    Builder (\state -> { state = state, value = v })
+
+
+{-| Transform the value inside a `Builder`. State is threaded through.
+-}
+map : (a -> b) -> Builder a -> Builder b
+map f (Builder ba) =
+    Builder
+        (\state ->
+            let
+                r =
+                    ba state
+            in
+            { state = r.state, value = f r.value }
+        )
+
+
+{-| Sequence two `Builder`s: run the first, feed its value into `f`, run the
+resulting builder. The id counter advances through both.
+-}
+andThen : (a -> Builder b) -> Builder a -> Builder b
+andThen f (Builder ba) =
+    Builder
+        (\state ->
+            let
+                r =
+                    ba state
+
+                (Builder bb) =
+                    f r.value
+            in
+            bb r.state
+        )
+
+
+{-| Allocate a fresh id and pass it to `f` to build the resulting value.
+This is the only way to advance the id counter, and is used internally by
+`PrettyExpressive.share`.
+-}
+withFreshId : (Int -> a) -> Builder a
+withFreshId f =
+    Builder
+        (\state ->
+            { state = { nextId = state.nextId + 1 }
+            , value = f state.nextId
+            }
+        )
+
+
+{-| Run a `Builder` starting from `freshState`, returning the final value.
+The final state is discarded.
+-}
+run : Builder a -> a
+run b =
+    (runWith freshState b).value
+
+
+{-| Run a `Builder` starting from a caller-supplied `State`, returning both
+the final value and the advanced state. Useful when composing multiple
+independent builds that should share an id namespace.
+-}
+runWith : State -> Builder a -> { state : State, value : a }
+runWith state (Builder b) =
+    b state

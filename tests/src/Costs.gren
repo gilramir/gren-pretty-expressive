@@ -4,6 +4,7 @@ import Expect exposing (Expectation)
 import Test exposing (..)
 
 import PrettyExpressive as P
+import PrettyExpressive.Builder as B
 
 suite : Test
 suite =
@@ -54,7 +55,7 @@ suite =
 module Terminal.Parser exposing ( Command(..), parser)
 """
 
-                        maybeActual = P.prettyFormat cf80 d
+                        maybeActual = P.prettyFormat cf80 (B.return d)
                     in
                         when maybeActual is
                             Nothing ->
@@ -88,7 +89,7 @@ module Terminal.Parser exposing ( Command(..), parser)
                         -- choice is left-associative: (flatOpt | twoLine) | threeLine
                         d = P.choice (P.choice flatOpt twoLine) threeLine
 
-                        maybeActual = P.prettyFormat cf80 d
+                        maybeActual = P.prettyFormat cf80 (B.return d)
                     in
                         when maybeActual is
                             Nothing ->
@@ -127,7 +128,7 @@ module Terminal.Parser exposing ( Command(..), parser)
                         -- flat left  = "a bb"  (4 chars, zero cost)
                         -- flat right = "c dd"  (4 chars, starting at col 4, zero cost)
                         -- concatenated: "a bbc dd"
-                        maybeActual = P.prettyFormat cf80 d
+                        maybeActual = P.prettyFormat cf80 (B.return d)
                     in
                         when maybeActual is
                             Nothing ->

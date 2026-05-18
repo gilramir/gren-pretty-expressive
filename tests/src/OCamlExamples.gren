@@ -4,6 +4,7 @@ import Expect exposing (Expectation)
 import Test exposing (..)
 
 import PrettyExpressive as P
+import PrettyExpressive.Builder as B
 
 {- The examples in this file come from:
 
@@ -90,7 +91,7 @@ while (true) {
         exit();
 }"""
 
-                        maybeActual = P.prettyFormat cf80 d
+                        maybeActual = P.prettyFormat cf80 (B.return d)
                     in
                         when maybeActual is
                             Nothing ->
@@ -109,7 +110,7 @@ while (true) {
     if (done()) exit();
 }"""
 
-                        maybeActual = P.prettyFormat cf80 ex1WithChoice
+                        maybeActual = P.prettyFormat cf80 (B.return ex1WithChoice)
                     in
                         when maybeActual is
                             Nothing ->
@@ -128,7 +129,54 @@ while (true) {
         exit();
 }"""
 
-                        maybeActual = P.prettyFormat cf20 ex1WithChoice
+                        maybeActual = P.prettyFormat cf20 (B.return ex1WithChoice)
+                    in
+                        when maybeActual is
+                            Nothing ->
+                                Expect.fail "document failed to print"
+                            Just actual ->
+                                Expect.equal expected actual
+
+            -- The same example built with `share` so the two references to
+            -- `exit();` resolve through the renderer's memo cache rather than
+            -- being recomputed independently. The output must match the
+            -- unshared version exactly.
+            , test "Example 1 With Choice (shared), 20 columns" <|
+                \_ ->
+                    let
+                        sharedBuilder : B.Builder (P.Doc P.DefaultCostTuple)
+                        sharedBuilder =
+                            P.share (P.text "exit();")
+                                |> B.map
+                                    (\exitD ->
+                                        P.concat (P.text "while (true) {")
+                                            (P.concat
+                                                (P.nest 4
+                                                    (P.concat P.nl
+                                                        (P.concat (P.text "f();")
+                                                            (P.concat P.nl
+                                                                (P.concat (P.text "if (done())")
+                                                                    (P.choice
+                                                                        (P.concat P.space exitD)
+                                                                        (P.nest 4 (P.concat P.nl exitD))
+                                                                    )
+                                                                )
+                                                            )
+                                                        )
+                                                    )
+                                                )
+                                                (P.concat P.nl (P.text "}"))
+                                            )
+                                    )
+
+                        expected = """
+while (true) {
+    f();
+    if (done())
+        exit();
+}"""
+
+                        maybeActual = P.prettyFormat cf20 sharedBuilder
                     in
                         when maybeActual is
                             Nothing ->

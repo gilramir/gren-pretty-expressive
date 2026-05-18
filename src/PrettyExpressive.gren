@@ -40,6 +40,7 @@ module PrettyExpressive exposing
     , rbrack
     , reset
     , rparen
+    , share
     , space
     , text
     , twoColumns
@@ -55,6 +56,7 @@ PrettyExpressive provides a default implementation, but you can implement
 your own.
 
     import PrettyExpressive as P
+    import PrettyExpressive.Builder as B
 
     cf : P.CostFactory P.DefaultCostTuple
     cf =
@@ -63,9 +65,9 @@ your own.
 
 ## Step 2: Use Doc constructors to create your document.
 
-    document : P.Doc
+    document : P.Doc cost
     document =
-            (P.text "hello" |> P.concat (P.text " world"))
+        P.text "hello" |> P.concat (P.text " world")
 
 For writing a pretty printer for a programming language, the essential
 kit comes down to five constructors and one combinator:
@@ -108,14 +110,31 @@ indentation, `breakDoc` when tokens should touch rather than have a space,
 `group` uses `choice`, to decide between the more optimal of two documents.
 The `choice` constructor may be useful in your own specialized situations.
 
-## Step 3: Render the document.
+## Step 3: Wrap the document in a Builder.
 
-Use a printing function, usually `prettyFormat`, to render your
-Doc as a string.
+The rendering entry points take a `Builder (Doc cost)` rather than a
+`Doc cost` directly. The Builder threads a fresh-id counter through the
+construction so that shared sub-documents (see [Sharing sub-documents]
+below) can be assigned unique ids for the renderer's memo cache.
+
+For a document that does **not** use `share`, lift the pure `Doc cost`
+value with `Builder.return`:
+
+    builder : B.Builder (P.Doc P.DefaultCostTuple)
+    builder =
+        B.return document
+
+For a document that **does** use `share`, build it inside the Builder so
+the share id allocations are sequenced. See [Sharing sub-documents] below.
+
+## Step 4: Render the document.
+
+Use a printing function, usually `prettyFormat`, to render your Doc as a
+string.
 
     printed : Maybe String
     printed =
-        P.prettyFormat cf document
+        P.prettyFormat cf builder
 
 The result from the printing functions is a Maybe String, because technically
 a document may fail to print. This can only happen if the you create your
@@ -132,6 +151,66 @@ than silently picking a wrong layout.
 In practice, only one thing causes a document to fail: every branch
 of every `choice` in the document must contain a `failDoc` or evaluate
 to one.
+
+# Sharing sub-documents
+
+The pretty-expressive algorithm is described in the paper as operating on
+a DAG of nodes, not a tree. When the same sub-document appears in two
+parents -- typically under the two branches of a `choice` -- the optimal
+renderer should resolve that sub-document **once** per `(column, indent)`
+position and reuse the result, rather than recomputing it for every
+reference.
+
+In OCaml, this falls out of value identity: `let exit_d = text "exit();"`
+allocates one record, and references to `exit_d` share its memo table.
+Gren has no physical identity to leverage, so sharing must be expressed
+explicitly via `share`.
+
+`share : Doc cost -> Builder (Doc cost)` stamps a unique share id on a
+sub-document. Every reference to the resulting `Doc` participates in the
+renderer's memo cache: the first visit at a given `(c, i)` populates the
+cache; subsequent visits at the same position return the cached
+`MeasureSet` instead of re-evaluating.
+
+To use it, bind the shared document inside the Builder and reference it
+from multiple positions:
+
+    sharedExample : B.Builder (P.Doc P.DefaultCostTuple)
+    sharedExample =
+        P.share (P.text "exit();")
+            |> B.map
+                (\exitD ->
+                    -- `exitD` is now a Doc with a unique share id.
+                    -- Two references → one resolution per (c, i).
+                    P.choice
+                        (P.concat P.space exitD)
+                        (P.nest 4 (P.concat P.nl exitD))
+                )
+
+For chains of shared sub-documents, use `Builder.andThen`:
+
+    twoShares : B.Builder (P.Doc cost)
+    twoShares =
+        P.share (P.text "exit();")
+            |> B.andThen
+                (\exitD ->
+                    P.share (P.text "f();")
+                        |> B.map
+                            (\callF ->
+                                ...combine exitD and callF...
+                            )
+                )
+
+**When sharing pays off:** the win grows with (a) the size of the shared
+subtree and (b) the number of layout branches that visit it. For trivial
+leaves like `text "x"` the savings are negligible; for non-trivial
+sub-expressions reachable through several `choice` arms, the savings can
+be order-of-magnitude.
+
+**When sharing is safe to skip:** if your document has no structurally
+repeated sub-trees, `B.return document` is all you need. The renderer
+will simply do no memoization and behave identically to the
+pre-Builder API.
 
 # Terminology
 
@@ -535,10 +614,14 @@ ordinary `Doc` trees -- but they are listed here for completeness.
 @docs rbrack
 @docs reset
 @docs rparen
+@docs share
 @docs space
 @docs text
 @docs twoColumns
 @docs vcat
+
+See `PrettyExpressive.Builder` for the `Builder` type used by `share` and
+by every entry point in the [Printing] section.
 
 # Printing
 
@@ -560,7 +643,9 @@ You aren't likely to use these, except for testing or debugging.
 @docs makeDebugFormat
 -}
 
+import Dict exposing (Dict)
 import Math
+import PrettyExpressive.Builder as Builder exposing (Builder)
 
 
 {-| Debugging information returned alongside a rendered string.
@@ -704,6 +789,14 @@ type Doc cost
     | DocFail
       -- ^ A document that always fails to render. Branches containing
       --   `DocFail` are pruned by `choice`.
+    | DocShared { id : Int, doc : Doc cost, nlCnt : Int }
+      -- ^ A sub-document marked for memoization by `share`. The renderer
+      --   caches the `MeasureSet` produced for this node at each
+      --   `(c, i)` it is visited from, so multiple references to the same
+      --   `DocShared` value resolve only once per position. `id` is the
+      --   share id allocated by the `Builder`. `nlCnt` is the precomputed
+      --   newline count of `doc`, used by the `DocChoice` branch-order
+      --   heuristic without re-walking the inner tree.
 
 
 
@@ -754,6 +847,98 @@ to a value). This is the idiomatic Gren equivalent of OCaml's `unit -> a`.
 type MeasureSet cost
     = Measures (Array (Measure cost))
     | Tainted ({} -> Measure cost)
+
+
+{-| Memoization cache used by `resolve` for `DocShared` nodes. Keys encode the
+share id together with the `(column, indent)` position the shared sub-document
+was resolved under, so multiple references to the same shared node at the same
+position share a single `MeasureSet`.
+
+Keyed on `String` because Gren's `Dict` only accepts primitive comparable keys
+(`Int`, `Float`, `Char`, `String`); tuples are not comparable.
+
+-}
+type alias Memo cost =
+    Dict String (MeasureSet cost)
+
+
+{-| Return type of the memo-threaded resolver. `memo` carries the (possibly
+updated) cache forward; `ms` is the resolved measure set for the current node.
+-}
+type alias Resolved cost =
+    { memo : Memo cost
+    , ms : MeasureSet cost
+    }
+
+
+{-| Build the memo key for a `(shareId, column, indent)` triple. -}
+memoKey : Int -> Int -> Int -> String
+memoKey id_ c i =
+    String.fromInt id_ ++ ":" ++ String.fromInt c ++ ":" ++ String.fromInt i
+
+
+{-| Count newlines in a document subtree.
+
+The result is exact for newline nodes and recursively summed for compounds.
+For `DocChoice`, the value is the *maximum* of the two branches — the
+choice has not yet been made, and the heuristic that uses this value
+(branch-order in the resolver) wants the pessimistic estimate.
+
+For `DocShared`, the precomputed `nlCnt` field is returned in O(1), so
+queries that cross a share boundary do not re-walk the shared subtree.
+
+Internal nodes that should not appear in user documents (`DocContext`,
+`DocEvaled`) report `0`; `DocBlank` and `DocFail` likewise have no
+newlines.
+
+-}
+nlCntOf : Doc cost -> Int
+nlCntOf d =
+    when d is
+        DocText _ ->
+            0
+
+        DocNewline _ ->
+            1
+
+        DocConcat { a = a, b = b } ->
+            nlCntOf a + nlCntOf b
+
+        DocChoice { a = a, b = b } ->
+            max (nlCntOf a) (nlCntOf b)
+
+        DocNest { doc = inner } ->
+            nlCntOf inner
+
+        DocAlign inner ->
+            nlCntOf inner
+
+        DocReset inner ->
+            nlCntOf inner
+
+        DocAddCost { doc = inner } ->
+            nlCntOf inner
+
+        DocContext _ ->
+            0
+
+        DocTwoColumns pairs ->
+            Array.foldl
+                (\pair acc -> acc + nlCntOf pair.a + nlCntOf pair.b)
+                0
+                pairs
+
+        DocBlank _ ->
+            0
+
+        DocEvaled _ ->
+            0
+
+        DocFail ->
+            0
+
+        DocShared { nlCnt = n } ->
+            n
 
 
 
@@ -1116,6 +1301,50 @@ addCost c d =
             DocAddCost { cost = c, doc = d }
 
 
+{-| Mark a document for memoization across multiple references.
+
+`share d` returns a `Builder (Doc cost)` that, when run, produces a
+`DocShared` node wrapping `d` with a unique share id. Each *reference* to
+the resulting shared value participates in the renderer's memo cache: the
+first time the shared node is resolved at a given `(column, indent)`
+position, the answer is cached; subsequent references at the same position
+hit the cache instead of re-evaluating the subtree.
+
+This is how the library realises the DAG semantics described in the
+pretty-expressive paper. Without `share`, multiple references to the same
+Gren `Doc` value are operationally indistinguishable from independent
+copies — Gren has no physical identity to leverage. With `share`, the
+common subtree is computed once per `(c, i)`.
+
+Sharing pays off when the same subtree is reachable through two layout
+branches that the renderer must both explore — for example, the `exit();`
+sub-document in:
+
+    P.share (P.text "exit();")
+        |> Builder.map (\exitD ->
+            P.choice
+                (P.concat P.space exitD)
+                (P.nest 4 (P.concat P.nl exitD))
+        )
+
+Without sharing the renderer would resolve `exit();` separately under each
+branch; with sharing it resolves once. For trivial leaves the win is small,
+but it grows with the size of the shared subtree and the depth of the
+choice structure around it.
+
+The `nlCnt` of the inner document is computed at share time and cached on
+the `DocShared` node, so the resolver's branch-order heuristic in
+`DocChoice` does not need to re-walk the shared subtree on every visit.
+
+-}
+share : Doc cost -> Builder (Doc cost)
+share d =
+    Builder.withFreshId
+        (\id_ ->
+            DocShared { id = id_, doc = d, nlCnt = nlCntOf d }
+        )
+
+
 
 -- ============================================================
 -- Derived combinators
@@ -1198,6 +1427,13 @@ flatten d =
         DocEvaled _ ->
             -- Internal node; should not appear in user documents.
             DocFail
+
+        DocShared { doc = inner } ->
+            -- `flatten` produces a new tree; the share marker (and its id)
+            -- is dropped because the resulting subtree is structurally
+            -- different. Callers that want the flattened form to be shared
+            -- can `share` the result themselves.
+            flatten inner
 
 
 {-| Try the document as-is; fall back to its flattened form if that is cheaper.
@@ -1501,48 +1737,63 @@ optimal.
 -}
 processConcat :
     CostFactory cost
-    -> (Measure cost -> MeasureSet cost)
+    -> (Measure cost -> Memo cost -> Resolved cost)
     -> MeasureSet cost
-    -> MeasureSet cost
-processConcat cf processLeft ml1 =
+    -> Memo cost
+    -> Resolved cost
+processConcat cf processLeft ml1 memo =
     when ml1 is
         Tainted mt1 ->
             -- Left side exceeded the computation limit. Force the single
             -- representative left measure and pair it with the best right match.
-            Tainted
-                (\{} ->
-                    let
-                        m1 =
-                            mt1 {}
-                    in
-                    when processLeft m1 is
-                        Tainted mt2 ->
-                            appendMeasures cf m1 (mt2 {})
+            -- The Tainted thunk captures `memo` but cannot publish back any
+            -- updates discovered while it runs (thunks are pure closures).
+            { memo = memo
+            , ms =
+                Tainted
+                    (\{} ->
+                        let
+                            m1 =
+                                mt1 {}
 
-                        Measures ms ->
-                            when Array.popFirst ms is
-                                Nothing ->
-                                    -- Unreachable: right side should not fail
-                                    -- when the left side already succeeded.
-                                    m1
+                            r =
+                                processLeft m1 memo
+                        in
+                        when r.ms is
+                            Tainted mt2 ->
+                                appendMeasures cf m1 (mt2 {})
 
-                                Just { first = m2 } ->
-                                    appendMeasures cf m1 m2
-                )
+                            Measures ms ->
+                                when Array.popFirst ms is
+                                    Nothing ->
+                                        -- Unreachable: right side should not fail
+                                        -- when the left side already succeeded.
+                                        m1
+
+                                    Just { first = m2 } ->
+                                        appendMeasures cf m1 m2
+                    )
+            }
 
         Measures ms1 ->
             let
                 -- For a single left measure m1, build the Pareto-optimal set
                 -- of (m1 ++ m2) combinations across all right measures m2.
-                doOne m1 =
-                    when processLeft m1 is
+                doOne m1 memo_ =
+                    let
+                        r =
+                            processLeft m1 memo_
+                    in
+                    when r.ms is
                         Tainted mt2 ->
-                            Tainted (\{} -> appendMeasures cf m1 (mt2 {}))
+                            { memo = r.memo
+                            , ms = Tainted (\{} -> appendMeasures cf m1 (mt2 {}))
+                            }
 
                         Measures ms ->
                             when Array.popFirst ms is
                                 Nothing ->
-                                    Measures []
+                                    { memo = r.memo, ms = Measures [] }
 
                                 Just { first = m2, rest = ms2 } ->
                                     let
@@ -1574,25 +1825,36 @@ processConcat cf processLeft ml1 =
                                                         -- emit it and move on.
                                                         loop rest (result ++ [ currentBest ]) current
                                     in
-                                    Measures (loop ms2 [] (appendMeasures cf m1 m2))
+                                    { memo = r.memo
+                                    , ms = Measures (loop ms2 [] (appendMeasures cf m1 m2))
+                                    }
 
                 -- Process each left measure individually, then merge all the
                 -- resulting sets into one Pareto-optimal combined set.
                 -- A right-fold processes wider left measures first, which tends
                 -- to produce more aggressive early pruning.
-                foldRight ms =
+                foldRight ms memo_ =
                     when Array.popFirst ms is
                         Nothing ->
-                            Measures []
+                            { memo = memo_, ms = Measures [] }
 
                         Just { first = m, rest = rest } ->
                             if Array.isEmpty rest then
-                                doOne m
+                                doOne m memo_
 
                             else
-                                mergeSets cf (doOne m) (foldRight rest)
+                                let
+                                    r1 =
+                                        doOne m memo_
+
+                                    r2 =
+                                        foldRight rest r1.memo
+                                in
+                                { memo = r2.memo
+                                , ms = mergeSets cf r1.ms r2.ms
+                                }
             in
-            foldRight ms1
+            foldRight ms1 memo
 
 
 {-| Extract a single best measure from a measure set, if one exists.
@@ -1669,16 +1931,41 @@ thunk so the calling resolver handles it correctly.
 -}
 doTwoColumns :
     CostFactory cost
-    -> (Doc cost -> Int -> Int -> MeasureSet cost)
+    -> (Doc cost -> Int -> Int -> Memo cost -> Resolved cost)
     -> Array (DocPair cost)
     -> Int
-    -> MeasureSet cost
-doTwoColumns cf self pairs c =
+    -> Memo cost
+    -> Resolved cost
+doTwoColumns cf self pairs c memo =
     let
         -- Evaluate every left cell. Both column and indent are set to `c`
         -- because the overall twoColumns node is implicitly aligned.
+        -- Memo is threaded sequentially through each left-cell resolution.
+        evalLeftCells :
+            Memo cost
+            -> Array (MeasureSet cost)
+            -> Array (DocPair cost)
+            -> { memo : Memo cost, cells : Array (MeasureSet cost) }
+        evalLeftCells memo_ acc remaining =
+            when Array.popFirst remaining is
+                Nothing ->
+                    { memo = memo_, cells = acc }
+
+                Just { first = pair, rest = rest } ->
+                    let
+                        r =
+                            self pair.a c c memo_
+                    in
+                    evalLeftCells r.memo (acc ++ [ r.ms ]) rest
+
+        leftEval =
+            evalLeftCells memo [] pairs
+
         leftMsList =
-            Array.map (\{ a = d1 } -> self d1 c c) pairs
+            leftEval.cells
+
+        memoAfterLeft =
+            leftEval.memo
 
         leftAnyTainted =
             Array.any
@@ -1822,9 +2109,9 @@ doTwoColumns cf self pairs c =
                             -- may produce better (wider) separator positions.
                             choice (innerLoop msList) (loopLimit ([ tup ] ++ before) rest)
 
-        getMeasureSet {} =
+        evalChoice memo_ =
             -- Evaluate the assembled choice document at (column=c, indent=c).
-            self (loopLimit [] afterList) c c
+            self (loopLimit [] afterList) c c memo_
 
         -- Force a MeasureSet to a single Measure; used when wrapping in a
         -- Tainted thunk below.
@@ -1843,10 +2130,23 @@ doTwoColumns cf self pairs c =
                             { last = c, cost = cf.text c 0, layout = [] }
     in
     if leftAnyTainted then
-        Tainted (\{} -> chooseOneLocal (getMeasureSet {}))
+        -- Memo updates discovered inside the Tainted thunk are not
+        -- propagated; the outer memo therefore reflects only the work done
+        -- to evaluate the left cells.
+        { memo = memoAfterLeft
+        , ms =
+            Tainted
+                (\{} ->
+                    let
+                        r =
+                            evalChoice memoAfterLeft
+                    in
+                    chooseOneLocal r.ms
+                )
+        }
 
     else
-        getMeasureSet {}
+        evalChoice memoAfterLeft
 
 
 
@@ -1882,21 +2182,26 @@ recursively into `doTwoColumns` so that function can call back into the
 resolver without needing to carry `cf` as a separate parameter every time.
 
 -}
-resolve : CostFactory cost -> Doc cost -> Int -> Int -> MeasureSet cost
-resolve cf doc c i =
+resolve : CostFactory cost -> Doc cost -> Int -> Int -> Memo cost -> Resolved cost
+resolve cf doc c i memo =
     let
-        self d c_ i_ =
-            resolve cf d c_ i_
+        self d c_ i_ memo_ =
+            resolve cf d c_ i_ memo_
+
+        leaf ms =
+            { memo = memo, ms = ms }
 
         core {} =
             when doc is
                 DocText { string = s, width = width } ->
-                    Measures
-                        [ { last = c + width
-                          , cost = cf.text c width
-                          , layout = [ s ]
-                          }
-                        ]
+                    leaf
+                        (Measures
+                            [ { last = c + width
+                              , cost = cf.text c width
+                              , layout = [ s ]
+                              }
+                            ]
+                        )
 
                 DocNewline _ ->
                     -- The flat-form string stored in `DocNewline (Just s)` is
@@ -1904,52 +2209,84 @@ resolve cf doc c i =
                     -- before resolution reaches this point. What we handle here
                     -- is always the "broken" case: emit a real newline and `i`
                     -- indentation spaces.
-                    Measures
-                        [ { last = i
-                          , cost = cf.newline i
-                          , layout = [ "\n", String.repeat i " " ]
-                          }
-                        ]
+                    leaf
+                        (Measures
+                            [ { last = i
+                              , cost = cf.newline i
+                              , layout = [ "\n", String.repeat i " " ]
+                              }
+                            ]
+                        )
 
                 DocBlank n ->
                     -- Internal padding node used by twoColumns. Zero cost
                     -- because the column-separator costs are charged separately
                     -- via twoColumnsOverflow / twoColumnsBias.
-                    Measures
-                        [ { last = c + n
-                          , cost = cf.text 0 0
-                          , layout = [ String.repeat n " " ]
-                          }
-                        ]
+                    leaf
+                        (Measures
+                            [ { last = c + n
+                              , cost = cf.text 0 0
+                              , layout = [ String.repeat n " " ]
+                              }
+                            ]
+                        )
 
                 DocConcat { a = d1, b = d2 } ->
                     -- Evaluate the left operand, then for each resulting measure
                     -- evaluate the right operand starting at m1.last.
-                    processConcat cf (\m1 -> self d2 m1.last i) (self d1 c i)
+                    let
+                        left =
+                            self d1 c i memo
+                    in
+                    processConcat cf
+                        (\m1 mLocal -> self d2 m1.last i mLocal)
+                        left.ms
+                        left.memo
 
                 DocChoice { a = d1, b = d2 } ->
                     -- Evaluate both branches and merge their measure sets.
-                    {-
+                    -- The nl_cnt heuristic resolves the branch with more
+                    -- newlines first; its wider Pareto frontier tends to
+                    -- prune the other branch's candidates more aggressively.
                     let
-                        _ = Debug.log "(a)" d1
-                        _ = Debug.log "(b)" d2
-                        m = Debug.log "(m)" (mergeSets cf (self d1 c i) (self d2 c i))
+                        useReverseOrder =
+                            nlCntOf d1 < nlCntOf d2
+
+                        firstD =
+                            if useReverseOrder then
+                                d2
+
+                            else
+                                d1
+
+                        secondD =
+                            if useReverseOrder then
+                                d1
+
+                            else
+                                d2
+
+                        r1 =
+                            self firstD c i memo
+
+                        r2 =
+                            self secondD c i r1.memo
                     in
-                    m
-                    -}
-                    mergeSets cf (self d1 c i) (self d2 c i)
+                    { memo = r2.memo
+                    , ms = mergeSets cf r1.ms r2.ms
+                    }
 
                 DocNest { indent = n, doc = d } ->
                     -- Increase indentation by n; current column is unchanged.
-                    self d c (i + n)
+                    self d c (i + n) memo
 
                 DocAlign d ->
                     -- Pin indentation to the current column.
-                    self d c c
+                    self d c c memo
 
                 DocReset d ->
                     -- Reset indentation to the left margin.
-                    self d c 0
+                    self d c 0 memo
 
                 DocAddCost { cost = co, doc = d } ->
                     -- Resolve the inner document, then prepend `co` to every
@@ -1957,33 +2294,57 @@ resolve cf doc c i =
                     let
                         addC m =
                             { m | cost = cf.combine co m.cost }
+
+                        r =
+                            self d c i memo
                     in
-                    when self d c i is
+                    when r.ms is
                         Measures ms ->
-                            Measures (Array.map addC ms)
+                            { memo = r.memo, ms = Measures (Array.map addC ms) }
 
                         Tainted mt ->
-                            Tainted (\{} -> addC (mt {}))
+                            { memo = r.memo, ms = Tainted (\{} -> addC (mt {})) }
 
                 DocContext f ->
                     -- Produce a document from the current (c, i) and resolve it.
                     -- Used internally by doTwoColumns for dynamic padding.
-                    self (f c i) c i
+                    self (f c i) c i memo
 
                 DocTwoColumns ds ->
-                    doTwoColumns cf self ds c
+                    doTwoColumns cf self ds c memo
 
                 DocEvaled ms ->
                     -- Return the pre-computed measure set directly. These nodes
                     -- are injected by doTwoColumns to avoid re-evaluating shared
                     -- left-cell sub-documents.
-                    ms
+                    leaf ms
 
                 DocFail ->
                     -- Signal failure with an empty measure set. The invariant
                     -- is that Measures [] represents failure throughout the
                     -- rendering pipeline.
-                    Measures []
+                    leaf (Measures [])
+
+                DocShared { id = sid, doc = inner } ->
+                    -- The renderer's DAG sharing mechanism. The same shared
+                    -- subtree visited at the same (c, i) returns the cached
+                    -- MeasureSet. First visit populates the cache.
+                    let
+                        key =
+                            memoKey sid c i
+                    in
+                    when Dict.get key memo is
+                        Just cached ->
+                            { memo = memo, ms = cached }
+
+                        Nothing ->
+                            let
+                                r =
+                                    self inner c i memo
+                            in
+                            { memo = Dict.set key r.ms r.memo
+                            , ms = r.ms
+                            }
 
         -- Decide whether this (doc, c, i) position exceeds the computation
         -- limit. Text nodes use c + width because we know in advance how far
@@ -2002,21 +2363,29 @@ resolve cf doc c i =
     in
     if exceeds then
         -- Beyond the computation limit: wrap in Tainted, collapsing the inner
-        -- result to a single representative measure.
-        Tainted
-            (\{} ->
-                when core {} is
-                    Tainted mt ->
-                        mt {}
+        -- result to a single representative measure. Memo updates discovered
+        -- inside the thunk are not propagated to the outer memo state.
+        { memo = memo
+        , ms =
+            Tainted
+                (\{} ->
+                    let
+                        r =
+                            core {}
+                    in
+                    when r.ms is
+                        Tainted mt ->
+                            mt {}
 
-                    Measures mms ->
-                        when Array.popFirst mms is
-                            Just { first = m, rest = _ } ->
-                                m
+                        Measures mms ->
+                            when Array.popFirst mms is
+                                Just { first = m, rest = _ } ->
+                                    m
 
-                            Nothing ->
-                                fallbackMeasure
-            )
+                                Nothing ->
+                                    fallbackMeasure
+                )
+        }
 
     else
         core {}
@@ -2038,7 +2407,7 @@ Use `prettyFormatInfoAt` if the output will be appended after existing content
 that starts at a non-zero column.
 
 -}
-prettyFormatInfo : CostFactory cost -> Doc cost -> Maybe { string : String, info : Info cost }
+prettyFormatInfo : CostFactory cost -> Builder (Doc cost) -> Maybe { string : String, info : Info cost }
 prettyFormatInfo cf =
     prettyFormatInfoAt cf 0
 
@@ -2050,9 +2419,16 @@ Use this when the rendered output will be placed after content that is already
 prompt on the same line.
 
 -}
-prettyFormatInfoAt : CostFactory cost -> Int -> Doc cost -> Maybe { string : String, info : Info cost }
-prettyFormatInfoAt cf initC d =
-    when resolve cf d initC 0 is
+prettyFormatInfoAt : CostFactory cost -> Int -> Builder (Doc cost) -> Maybe { string : String, info : Info cost }
+prettyFormatInfoAt cf initC builder =
+    let
+        d =
+            Builder.run builder
+
+        result =
+            resolve cf d initC 0 Dict.empty
+    in
+    when result.ms is
         Measures mms ->
             when Array.popFirst mms is
                 Just { first = m, rest = _ } ->
@@ -2080,15 +2456,20 @@ prettyFormatInfoAt cf initC d =
 
 Returns `Nothing` if the document fails to render.
 
+The argument is a `Builder (Doc cost)` rather than a `Doc cost` directly so
+that documents with shared sub-trees (built via `share`) carry along the
+id-counter state. For documents that do not use `share`, lift the pure
+`Doc cost` value with `PrettyExpressive.Builder.return`.
+
 -}
-prettyFormat : CostFactory cost -> Doc cost -> Maybe String
+prettyFormat : CostFactory cost -> Builder (Doc cost) -> Maybe String
 prettyFormat cf d =
     prettyFormatInfo cf d
         |> Maybe.map (\{ string = string } -> string)
 
 
 {-| Like `prettyFormat`, but printing begins at column `initC`. -}
-prettyFormatAt : CostFactory cost -> Int -> Doc cost -> Maybe String
+prettyFormatAt : CostFactory cost -> Int -> Builder (Doc cost) -> Maybe String
 prettyFormatAt cf initC d =
     prettyFormatInfoAt cf initC d
         |> Maybe.map (\{ string = string } -> string)
@@ -2104,13 +2485,13 @@ default implementation is `makeDebugFormat`.
 Returns `Nothing` if the document fails to render.
 
 -}
-prettyFormatDebug : CostFactory cost -> Doc cost -> Maybe String
+prettyFormatDebug : CostFactory cost -> Builder (Doc cost) -> Maybe String
 prettyFormatDebug cf d =
     prettyFormatDebugAt cf 0 d
 
 
 {-| Like `prettyFormatDebug`, but printing begins at column `initC`. -}
-prettyFormatDebugAt : CostFactory cost -> Int -> Doc cost -> Maybe String
+prettyFormatDebugAt : CostFactory cost -> Int -> Builder (Doc cost) -> Maybe String
 prettyFormatDebugAt cf initC d =
     prettyFormatInfoAt cf initC d
         |> Maybe.map

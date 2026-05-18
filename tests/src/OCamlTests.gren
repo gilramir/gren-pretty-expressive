@@ -4,6 +4,7 @@ import Expect exposing (Expectation)
 import Test exposing (..)
 
 import PrettyExpressive as P
+import PrettyExpressive.Builder as B
 
 {- These are the translated unit tests from OCaml, from this file:
     https://github.com/sorawee/pretty-expressive-ocaml/blob/main/test/main.ml
@@ -126,7 +127,7 @@ suite =
                     let
                         cf4 = P.defaultCostFactory { pageWidth = 4, computationWidth = Nothing }
                         expected = "(a\n b\n c\n d)"
-                        maybeActual = P.prettyFormat cf4 (prettySexp exampleSexp)
+                        maybeActual = P.prettyFormat cf4 (B.return (prettySexp exampleSexp))
                     in
                     when maybeActual is
                         Nothing     -> Expect.fail "document failed to render"
@@ -146,7 +147,7 @@ suite =
                     let
                         cf6 = P.defaultCostFactory { pageWidth = 6, computationWidth = Nothing }
                         expected = "(a b\n   c\n   d)"
-                        maybeActual = P.prettyFormat cf6 (prettySexp exampleSexp)
+                        maybeActual = P.prettyFormat cf6 (B.return (prettySexp exampleSexp))
                     in
                     when maybeActual is
                         Nothing     -> Expect.fail "document failed to render"
@@ -162,7 +163,7 @@ suite =
                     let
                         cf10 = P.defaultCostFactory { pageWidth = 10, computationWidth = Nothing }
                         expected = "(a b c d)"
-                        maybeActual = P.prettyFormat cf10 (prettySexp exampleSexp)
+                        maybeActual = P.prettyFormat cf10 (B.return (prettySexp exampleSexp))
                     in
                     when maybeActual is
                         Nothing     -> Expect.fail "document failed to render"

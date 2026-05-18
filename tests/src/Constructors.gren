@@ -4,6 +4,7 @@ import Expect exposing (Expectation)
 import Test exposing (..)
 
 import PrettyExpressive as P
+import PrettyExpressive.Builder as B
 
 suite : Test
 suite =
@@ -25,7 +26,7 @@ suite =
                             d = P.empty
 
                             expected = ""
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -39,7 +40,7 @@ suite =
                             d = P.text "foo"
 
                             expected = "foo"
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -52,7 +53,7 @@ suite =
                         let
                             d = P.failDoc
 
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -66,7 +67,7 @@ suite =
                             d = P.nl
 
                             expected = "\n"
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -80,7 +81,7 @@ suite =
                             d = P.concat P.nl P.nl
 
                             expected = "\n\n"
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -102,7 +103,7 @@ suite =
 
                             -- No line break because we allow 80 columns
                             expected = "Break =><= here when the next line is long"
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -124,7 +125,7 @@ suite =
 
                             -- Line break because we allow 20 columns
                             expected = "Break =>\n<= here when the next line is long"
-                            maybeActual = P.prettyFormat cf20 d
+                            maybeActual = P.prettyFormat cf20 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -146,7 +147,7 @@ suite =
 
                             -- hardNl always produces a line break
                             expected = "Break =>\n<= here when the next line is long"
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -168,7 +169,7 @@ suite =
 
                             -- hardNl always produces a line break
                             expected = "Break =>\n<= here when the next line is long"
-                            maybeActual = P.prettyFormat cf20 d
+                            maybeActual = P.prettyFormat cf20 (B.return d)
                         in
                             when maybeActual is
                                 Nothing ->
@@ -193,7 +194,7 @@ suite =
                         -- Rendering `newline (Just ", ")` directly gives "\n".
                         let
                             d = P.concat (P.text "a") (P.concat (P.newline (Just ", ")) (P.text "b"))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -204,7 +205,7 @@ suite =
                         -- flatten (newline (Just ", ")) == text ", "
                         let
                             d = P.concat (P.text "a") (P.concat (P.flatten (P.newline (Just ", "))) (P.text "b"))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -216,7 +217,7 @@ suite =
                         -- fits in both cf80 and cf20 so the comma-space wins.
                         let
                             d = P.group (P.concat (P.text "a") (P.concat (P.newline (Just ", ")) (P.text "b")))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -235,7 +236,7 @@ suite =
                                             (P.text "b long right side")
                                         )
                                     )
-                            maybeActual = P.prettyFormat cf20 d
+                            maybeActual = P.prettyFormat cf20 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -246,7 +247,7 @@ suite =
                         -- newline Nothing has no flat form; flatten turns it into failDoc.
                         let
                             d = P.flatten (P.newline Nothing)
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass
@@ -268,7 +269,7 @@ suite =
                         -- concat empty d  ==  d  (no extra node allocated)
                         let
                             d = P.concat P.empty (P.text "hello")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -278,7 +279,7 @@ suite =
                     \_ ->
                         let
                             d = P.concat (P.text "hello") P.empty
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -289,7 +290,7 @@ suite =
                         -- DocText ++ DocText => single DocText at construction time.
                         let
                             d = P.concat (P.text "foo") (P.text "bar")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -299,7 +300,7 @@ suite =
                     \_ ->
                         let
                             d = P.concat P.failDoc (P.text "hello")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass
@@ -309,7 +310,7 @@ suite =
                     \_ ->
                         let
                             d = P.concat (P.text "hello") P.failDoc
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass
@@ -328,7 +329,7 @@ suite =
                         -- choice failDoc d  ==  d  (smart constructor fires)
                         let
                             d = P.choice P.failDoc (P.text "hello")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -338,7 +339,7 @@ suite =
                     \_ ->
                         let
                             d = P.choice (P.text "hello") P.failDoc
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -348,7 +349,7 @@ suite =
                     \_ ->
                         let
                             d = P.choice P.failDoc P.failDoc
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass
@@ -362,7 +363,7 @@ suite =
                             oneLine  = P.text "hello world"
                             twoLines = P.concat (P.text "hello") (P.concat P.nl (P.text "world"))
                             d = P.choice oneLine twoLines
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -377,7 +378,7 @@ suite =
                             oneLine  = P.text "this overflows the narrow limit"
                             twoLines = P.concat (P.text "short line") (P.concat P.nl (P.text "also short"))
                             d = P.choice oneLine twoLines
-                            maybeActual = P.prettyFormat cf20 d
+                            maybeActual = P.prettyFormat cf20 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -399,7 +400,7 @@ suite =
                                     (P.concat (P.text "if true:")
                                         (P.concat P.nl (P.text "body"))
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -410,7 +411,7 @@ suite =
                         let
                             d = P.nest 2
                                     (P.concat_array [ P.text "a", P.nl, P.text "b", P.nl, P.text "c" ])
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -424,7 +425,7 @@ suite =
                                     (P.nest 3
                                         (P.concat (P.text "x") (P.concat P.nl (P.text "y")))
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -435,7 +436,7 @@ suite =
                         -- nest only affects newlines; text at the start is unaffected.
                         let
                             d = P.nest 10 (P.text "hello")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -454,7 +455,7 @@ suite =
                                             (P.concat (P.text "first") (P.concat P.nl (P.text "second")))
                                         )
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -477,7 +478,7 @@ suite =
                                     (P.align
                                         (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -494,7 +495,7 @@ suite =
                                             (P.concat (P.text "one") (P.concat P.nl (P.text "two")))
                                         )
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -505,7 +506,7 @@ suite =
                         -- Starting at column 0, align sets i=0 which is the default.
                         let
                             d = P.align (P.concat (P.text "x") (P.concat P.nl (P.text "y")))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -533,7 +534,7 @@ suite =
                                             )
                                         )
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -553,7 +554,7 @@ suite =
                                         , P.text "back to 4"
                                         ]
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -580,7 +581,7 @@ suite =
                                             )
                                         )
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -599,7 +600,7 @@ suite =
                         let
                             zeroCost = { badness = 0, columnOverflow = 0, height = 0 }
                             d = P.addCost zeroCost (P.text "hello")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -615,7 +616,7 @@ suite =
                             d = P.choice
                                     (P.addCost bigPenalty (P.text "short"))
                                     (P.text "longer option")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -626,7 +627,7 @@ suite =
                         -- Confirm baseline: no cost manipulation means "short" wins.
                         let
                             d = P.choice (P.text "short") (P.text "longer option")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -637,7 +638,7 @@ suite =
                         let
                             zeroCost = { badness = 0, columnOverflow = 0, height = 0 }
                             d = P.addCost zeroCost P.failDoc
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass
@@ -656,7 +657,7 @@ suite =
                         -- "foo bar" = 7 chars, fits in 80 columns.
                         let
                             d = P.group (P.concat (P.text "foo") (P.concat P.nl (P.text "bar")))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -668,7 +669,7 @@ suite =
                         let
                             d = P.group
                                     (P.concat (P.text "longer text here") (P.concat P.nl (P.text "and more text")))
-                            maybeActual = P.prettyFormat cf20 d
+                            maybeActual = P.prettyFormat cf20 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -680,7 +681,7 @@ suite =
                         -- The broken form is the only option regardless of page width.
                         let
                             d = P.group (P.concat (P.text "a") (P.concat P.hardNl (P.text "b")))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -690,7 +691,7 @@ suite =
                     \_ ->
                         let
                             d = P.flatten (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -700,7 +701,7 @@ suite =
                     \_ ->
                         let
                             d = P.flatten (P.concat (P.text "a") (P.concat P.breakDoc (P.text "b")))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -710,7 +711,7 @@ suite =
                     \_ ->
                         let
                             d = P.flatten (P.concat (P.text "a") (P.concat P.hardNl (P.text "b")))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass
@@ -725,7 +726,7 @@ suite =
                                     (P.nest 2
                                         (P.concat (P.text "x") (P.concat P.nl (P.text "y")))
                                     )
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -742,7 +743,7 @@ suite =
                 [ test "twoColumns: empty array renders as empty" <|
                     \_ ->
                         let
-                            maybeActual = P.prettyFormat cf80 (P.twoColumns [])
+                            maybeActual = P.prettyFormat cf80 (B.return (P.twoColumns []))
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -754,7 +755,7 @@ suite =
                         -- degenerates to align (concat a b).
                         let
                             d = P.twoColumns [ { a = P.text "key", b = P.text " = value" } ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -773,7 +774,7 @@ suite =
                                     [ { a = P.text "a",  b = P.text "111" }
                                     , { a = P.text "bb", b = P.text "222" }
                                     ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -793,7 +794,7 @@ suite =
                                     , { a = P.text "age",  b = P.text ": 30" }
                                     , { a = P.text "city", b = P.text ": NYC" }
                                     ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -806,7 +807,7 @@ suite =
                                     [ { a = P.text "ok",   b = P.text "fine" }
                                     , { a = P.failDoc,     b = P.text "bad"  }
                                     ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass
@@ -824,7 +825,7 @@ suite =
                     \_ ->
                         let
                             d = P.hardNlConcat (P.text "line1") (P.text "line2")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -834,7 +835,7 @@ suite =
                     \_ ->
                         let
                             d = P.hardNlConcat (P.text "a") (P.text "b")
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -851,7 +852,7 @@ suite =
                             d = P.alignedConcat
                                     (P.text "foo: ")
                                     (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -870,7 +871,7 @@ suite =
                             left  = P.concat (P.text "a") (P.concat P.nl (P.text "b"))
                             right = P.concat (P.text "c") (P.concat P.nl (P.text "d"))
                             d = P.flattenAlignedConcat left right
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -883,7 +884,7 @@ suite =
                             left  = P.concat (P.text "a") (P.concat P.hardNl (P.text "b"))
                             right = P.text "c"
                             d = P.flattenAlignedConcat left right
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass
@@ -897,7 +898,7 @@ suite =
                     \_ ->
                         let
                             d = P.vcat [ P.text "a", P.text "b", P.text "c" ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -906,7 +907,7 @@ suite =
                 , test "vcat: empty array renders as empty" <|
                     \_ ->
                         let
-                            maybeActual = P.prettyFormat cf80 (P.vcat [])
+                            maybeActual = P.prettyFormat cf80 (B.return (P.vcat []))
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -917,7 +918,7 @@ suite =
                         -- Even with cf80, vcat never flattens its separators.
                         let
                             d = P.vcat [ P.text "one", P.text "two" ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -931,7 +932,7 @@ suite =
                     \_ ->
                         let
                             d = P.hcat [ P.text "a", P.text "b", P.text "c" ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -948,7 +949,7 @@ suite =
                                     [ P.text "foo"
                                     , P.concat (P.text "bar") (P.concat P.nl (P.text "baz"))
                                     ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -957,7 +958,7 @@ suite =
                 , test "hcat: empty array renders as empty" <|
                     \_ ->
                         let
-                            maybeActual = P.prettyFormat cf80 (P.hcat [])
+                            maybeActual = P.prettyFormat cf80 (B.return (P.hcat []))
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -974,7 +975,7 @@ suite =
                         let
                             d = P.foldDoc P.hardNlConcat
                                     [ P.text "first", P.text "second", P.text "third" ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -983,7 +984,7 @@ suite =
                 , test "foldDoc: empty array returns empty" <|
                     \_ ->
                         let
-                            maybeActual = P.prettyFormat cf80 (P.foldDoc P.concat [])
+                            maybeActual = P.prettyFormat cf80 (B.return (P.foldDoc P.concat []))
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -993,7 +994,7 @@ suite =
                     \_ ->
                         let
                             d = P.foldDoc P.hardNlConcat [ P.text "only" ]
-                            maybeActual = P.prettyFormat cf80 d
+                            maybeActual = P.prettyFormat cf80 (B.return d)
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
