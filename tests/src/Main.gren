@@ -6,6 +6,7 @@ import Test.Runner.Node exposing (Program, run)
 
 import Constructors
 import Costs
+import FlattenDedup
 import JsonTest
 import OCamlExamples
 import OCamlTests
@@ -17,6 +18,7 @@ main =
         describe "All Tests"
             [ Constructors.suite
             , Costs.suite
+            , FlattenDedup.suite
             , JsonTest.suite
             , OCamlExamples.suite
             , OCamlTests.suite

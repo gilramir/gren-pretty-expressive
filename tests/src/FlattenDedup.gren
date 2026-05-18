@@ -1,0 +1,255 @@
+module FlattenDedup exposing (suite)
+
+{-| Tests for `flatten`'s structural-equality dedup of `DocChoice` branches.
+
+`flatten` is idempotent, so `flatten (group d) == flatten (choice d (flatten d))
+== choice (flatten d) (flatten (flatten d)) == choice (flatten d) (flatten d)`
+— two structurally identical branches. The smart constructor for `choice`
+only dedupes on `DocFail`, so without further care the renderer would
+evaluate both identical branches at every `(c, i)` and merge identical
+measure sets. Nested `group`s compound this into exponential wasted work.
+
+The fix is a structural-equality check inside `flatten`'s `DocChoice` arm:
+when both flattened branches compare equal, return one of them in place of
+constructing a `DocChoice`. These tests verify the structural collapse and
+that rendering still matches the un-fixed semantics.
+
+-}
+
+import Expect exposing (Expectation)
+import Test exposing (Test, describe, test)
+
+import PrettyExpressive as P
+import PrettyExpressive exposing (Doc(..))
+import PrettyExpressive.Builder as B
+
+
+-- ----------------------------------------------------------------------------
+-- Helpers
+-- ----------------------------------------------------------------------------
+
+
+cf : P.CostFactory P.DefaultCostTuple
+cf =
+    P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+
+{-| Count `DocChoice` nodes in a Doc tree. Used to verify dedup is collapsing
+choices we expect to collapse. Recurses into all structural sub-docs.
+-}
+countChoices : Doc cost -> Int
+countChoices d =
+    when d is
+        DocChoice { a = a, b = b } ->
+            1 + countChoices a + countChoices b
+
+        DocConcat { a = a, b = b } ->
+            countChoices a + countChoices b
+
+        DocNest { doc = inner } ->
+            countChoices inner
+
+        DocAlign inner ->
+            countChoices inner
+
+        DocReset inner ->
+            countChoices inner
+
+        DocAddCost { doc = inner } ->
+            countChoices inner
+
+        DocShared { doc = inner } ->
+            countChoices inner
+
+        _ ->
+            0
+
+
+{-| Render a Doc and return the resulting string (or "" on failure). For
+tests that only care about the rendered output and ignore failure
+distinctions.
+-}
+render : Doc P.DefaultCostTuple -> String
+render d =
+    when P.prettyFormat cf (B.return d) is
+        Just s ->
+            s
+
+        Nothing ->
+            ""
+
+
+-- ----------------------------------------------------------------------------
+-- Tests
+-- ----------------------------------------------------------------------------
+
+
+suite : Test
+suite =
+    describe "flatten: dedup identical DocChoice branches"
+        [ describe "structural collapse"
+
+            [ test "flatten (group (text x)) drops the choice node" <|
+                \_ ->
+                    -- `group (text "x")` = `choice (text "x") (flatten (text "x"))`
+                    --                    = `choice (text "x") (text "x")`.
+                    -- Both branches are equal; flatten should collapse to a
+                    -- single text node and produce no DocChoice.
+                    let
+                        d =
+                            P.flatten (P.group (P.text "x"))
+                    in
+                    Expect.equal 0 (countChoices d)
+
+            , test "flatten (group (nl-separated text)) drops the choice node" <|
+                \_ ->
+                    -- Inside flatten, both branches of the group become
+                    -- "a b" (text "a" + " " + text "b"), structurally equal.
+                    let
+                        d =
+                            P.flatten
+                                (P.group
+                                    (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
+                                )
+                    in
+                    Expect.equal 0 (countChoices d)
+
+            , test "flatten ((group (nl x))) inside a nest drops the choice node" <|
+                \_ ->
+                    -- nest is dropped by flatten, so the inner choice's
+                    -- branches both reduce to " x" and dedupe.
+                    let
+                        d =
+                            P.flatten
+                                (P.nest 4
+                                    (P.group (P.concat P.nl (P.text "x")))
+                                )
+                    in
+                    Expect.equal 0 (countChoices d)
+
+            , test "flatten (nested groups) collapses every inner choice" <|
+                \_ ->
+                    -- group (group (concat nl x)) — both inner and outer
+                    -- choices collapse under flatten. Result: just text " x".
+                    let
+                        d =
+                            P.flatten
+                                (P.group
+                                    (P.group
+                                        (P.concat P.nl (P.text "x"))
+                                    )
+                                )
+                    in
+                    Expect.equal 0 (countChoices d)
+
+            , test "flatten preserves DocChoice when branches differ" <|
+                \_ ->
+                    -- `choice (text "a") (text "b")` flattens to itself:
+                    -- both branches are already flat but structurally
+                    -- distinct, so the choice node is preserved.
+                    let
+                        d =
+                            P.flatten
+                                (P.choice (P.text "a") (P.text "b"))
+                    in
+                    Expect.equal 1 (countChoices d)
+            ]
+
+        , describe "render equivalence (semantics preserved)"
+
+            [ test "flatten (group (text x)) renders as the text" <|
+                \_ ->
+                    Expect.equal "x" (render (P.flatten (P.group (P.text "x"))))
+
+            , test "flatten (group (nl-separated)) renders as space-joined" <|
+                \_ ->
+                    let
+                        d =
+                            P.flatten
+                                (P.group
+                                    (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
+                                )
+                    in
+                    Expect.equal "a b" (render d)
+
+            , test "flatten (nested groups) renders as fully-flattened text" <|
+                \_ ->
+                    let
+                        d =
+                            P.flatten
+                                (P.group
+                                    (P.group
+                                        (P.concat (P.text "a")
+                                            (P.concat P.nl (P.text "b"))
+                                        )
+                                    )
+                                )
+                    in
+                    Expect.equal "a b" (render d)
+
+            , test "flatten (group hardNl-content) fails (no flat form)" <|
+                \_ ->
+                    -- hardNl flattens to failDoc, so `group (concat hardNl x)`
+                    -- = choice (concat hardNl x) (failDoc) = (concat hardNl x).
+                    -- Then flatten of that = concat (flatten hardNl) (flatten x)
+                    -- = concat failDoc (text "x") = failDoc. No render.
+                    let
+                        d =
+                            P.flatten
+                                (P.group
+                                    (P.concat P.hardNl (P.text "x"))
+                                )
+                    in
+                    when P.prettyFormat cf (B.return d) is
+                        Nothing ->
+                            Expect.pass
+
+                        Just _ ->
+                            Expect.fail "expected flatten of group-with-hardNl to fail"
+
+            , test "group preserves both layouts when un-flattened" <|
+                \_ ->
+                    -- Sanity check: the dedup only kicks in inside flatten;
+                    -- the original group(nl x) still has two distinct branches.
+                    let
+                        d =
+                            P.group
+                                (P.concat (P.text "aa")
+                                    (P.concat P.nl (P.text "bb"))
+                                )
+                    in
+                    -- Wide page → flat form chosen.
+                    Expect.equal "aa bb" (render d)
+            ]
+
+        , describe "no exponential blow-up under deep nesting"
+
+            [ test "10 nested groups flatten and render (no choice nodes left)" <|
+                \_ ->
+                    -- Without the fix, every level of `flatten (group d)` adds
+                    -- a duplicate-branch choice; with N=10 levels the renderer
+                    -- would explore 2^10 identical layouts. With the fix each
+                    -- level's flatten collapses immediately, so the result is
+                    -- a single fully-flattened text and rendering is O(N).
+                    let
+                        nestGroup : Int -> Doc P.DefaultCostTuple -> Doc P.DefaultCostTuple
+                        nestGroup n inner =
+                            if n <= 0 then
+                                inner
+
+                            else
+                                P.group (nestGroup (n - 1) inner)
+
+                        d =
+                            P.flatten
+                                (nestGroup 10
+                                    (P.concat (P.text "x") (P.concat P.nl (P.text "y")))
+                                )
+                    in
+                    Expect.all
+                        [ \doc -> Expect.equal 0 (countChoices doc)
+                        , \doc -> Expect.equal "x y" (render doc)
+                        ]
+                        d
+            ]
+        ]
