@@ -8,6 +8,7 @@ import Constructors
 import Costs
 import FlattenDedup
 import JsonTest
+import NlCntCaching
 import OCamlExamples
 import OCamlTests
 import TwoColumnsShare
@@ -21,6 +22,7 @@ main =
             , Costs.suite
             , FlattenDedup.suite
             , JsonTest.suite
+            , NlCntCaching.suite
             , OCamlExamples.suite
             , OCamlTests.suite
             , TwoColumnsShare.suite

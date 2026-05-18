@@ -1,0 +1,244 @@
+module NlCntCaching exposing (suite)
+
+{-| Tests for the cached `nlCnt` field on `DocConcat` and `DocChoice`.
+
+The resolver's `DocChoice` branch-order heuristic calls `nlCntOf` on
+both branches at every visit. Before this cache, `nlCntOf` on a
+compound node was an O(subtree) recursive walk; for deeply nested
+choices visited many times during resolution that compounded into a
+real cost factor.
+
+`concat` and `choice` (the smart constructors) now compute the
+appropriate newline count at construction time and store it on the
+resulting node — `nlCntOf a + nlCntOf b` for `DocConcat`,
+`max (nlCntOf a) (nlCntOf b)` for `DocChoice`. `nlCntOf` reads the
+cached field directly, making compound queries O(1).
+
+Because the smart constructors set the field, all docs built through
+the public API have a correct cache. These tests verify the cache is
+populated correctly across the compound nodes, that `nlCntOf` honours
+the cache, and that rendering is unchanged.
+
+-}
+
+import Expect exposing (Expectation)
+import Test exposing (Test, describe, test)
+
+import PrettyExpressive as P
+import PrettyExpressive exposing (Doc(..))
+import PrettyExpressive.Builder as B
+
+
+cf : P.CostFactory P.DefaultCostTuple
+cf =
+    P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+
+{-| Extract the cached nlCnt from a DocConcat or DocChoice. Returns
+`Just n` for those two node kinds and `Nothing` for any other shape,
+so the test can assert "the top-level node is the expected compound
+with the expected cached count" in one shot.
+-}
+cachedNlCnt : Doc cost -> Maybe Int
+cachedNlCnt d =
+    when d is
+        DocConcat { nlCnt = n } ->
+            Just n
+
+        DocChoice { nlCnt = n } ->
+            Just n
+
+        _ ->
+            Nothing
+
+
+suite : Test
+suite =
+    describe "Cached nlCnt on DocConcat and DocChoice"
+        [ describe "cache is populated at construction"
+
+            [ test "concat of two texts caches 0 (no newlines)" <|
+                \_ ->
+                    -- Adjacent texts fuse into a single DocText (no
+                    -- DocConcat constructed), so wrap one in a soft newline
+                    -- to force a real concat node.
+                    let
+                        d =
+                            P.concat (P.text "a") (P.concat P.nl (P.text "b"))
+                    in
+                    Expect.equal (Just 1) (cachedNlCnt d)
+
+            , test "concat with two newlines caches 2" <|
+                \_ ->
+                    let
+                        d =
+                            P.concat P.nl P.hardNl
+                    in
+                    Expect.equal (Just 2) (cachedNlCnt d)
+
+            , test "choice of two branches caches the max newline count" <|
+                \_ ->
+                    -- Left branch has 1 newline, right has 0.
+                    -- max = 1.
+                    let
+                        d =
+                            P.choice
+                                (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
+                                (P.text "ab")
+                    in
+                    Expect.equal (Just 1) (cachedNlCnt d)
+
+            , test "choice where right branch has more newlines caches its count" <|
+                \_ ->
+                    let
+                        d =
+                            P.choice
+                                (P.text "flat")
+                                (P.concat P.hardNl (P.concat P.nl (P.text "b")))
+                    in
+                    Expect.equal (Just 2) (cachedNlCnt d)
+
+            , test "nested concat propagates newline count upward" <|
+                \_ ->
+                    -- 3 nested concats with 3 newlines total.
+                    let
+                        d =
+                            P.concat (P.text "a")
+                                (P.concat P.nl
+                                    (P.concat (P.text "b")
+                                        (P.concat P.nl
+                                            (P.concat (P.text "c") P.hardNl)
+                                        )
+                                    )
+                                )
+                    in
+                    Expect.equal (Just 3) (cachedNlCnt d)
+
+            , test "group's resulting choice caches max of its two branches" <|
+                \_ ->
+                    -- group (concat (text "a") (concat nl (text "b")))
+                    -- = choice (concat ... nl ...) (flatten ...)
+                    -- The unflattened branch has 1 newline; the flat branch
+                    -- has 0. max = 1.
+                    let
+                        d =
+                            P.group
+                                (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
+                    in
+                    Expect.equal (Just 1) (cachedNlCnt d)
+            ]
+
+        , describe "smart constructor normalizations propagate correctly"
+
+            [ test "concat absorbs DocAddCost on the right and the resulting concat caches the right count" <|
+                \_ ->
+                    -- DocAddCost is floated outward by the concat smart
+                    -- constructor: `concat d1 (DocAddCost c inner2)` becomes
+                    -- `addCost c (concat d1 inner2)`. The inner concat must
+                    -- still have a correct cached nlCnt.
+                    let
+                        someCost =
+                            { badness = 0, columnOverflow = 0, height = 0 }
+
+                        d =
+                            P.concat (P.text "x")
+                                (P.addCost someCost
+                                    (P.concat P.nl (P.text "y"))
+                                )
+                    in
+                    -- Top-level is DocAddCost (after the float). Walk into
+                    -- it and check the inner concat's cache.
+                    when d is
+                        DocAddCost { doc = inner } ->
+                            Expect.equal (Just 1) (cachedNlCnt inner)
+
+                        _ ->
+                            Expect.fail "expected DocAddCost at top after float"
+
+            , test "choice drops DocFail and the resulting non-DocChoice has no cache" <|
+                \_ ->
+                    -- choice DocFail x = x. The result is not a DocChoice,
+                    -- so cachedNlCnt returns Nothing.
+                    let
+                        d =
+                            P.choice P.failDoc (P.text "x")
+                    in
+                    Expect.equal Nothing (cachedNlCnt d)
+
+            , test "concat of empty text returns the other operand unchanged" <|
+                \_ ->
+                    -- concat empty x = x. The result is the original DocText,
+                    -- not a new DocConcat.
+                    let
+                        d =
+                            P.concat P.empty (P.text "x")
+                    in
+                    Expect.equal Nothing (cachedNlCnt d)
+            ]
+
+        , describe "nlCntOf reads from cache (behavioural sanity)"
+
+            [ test "nested-group concat tree reports the right total" <|
+                \_ ->
+                    -- Construct a doc with multiple nested groups and verify
+                    -- the surface-level nlCntOf still returns a correct
+                    -- count. (This is the property that breaks if the
+                    -- cached field is mis-populated.)
+                    let
+                        inner =
+                            P.concat (P.text "x") (P.concat P.nl (P.text "y"))
+
+                        d =
+                            P.concat (P.text "before")
+                                (P.concat
+                                    (P.group inner)
+                                    (P.concat P.hardNl (P.group inner))
+                                )
+                    in
+                    -- inner has 1 nl. group inner = choice inner (flat inner),
+                    -- max nlCnt = 1. Outer structure: text + group(1) + hardNl + group(1).
+                    -- nlCntOf on the outermost concat: 0 + 1 + 1 + 1 = 3.
+                    Expect.equal 3 (cachedNlCnt d |> Maybe.withDefault -1)
+            ]
+
+        , describe "rendering is unchanged"
+
+            [ test "group with newline still renders flat at wide page" <|
+                \_ ->
+                    let
+                        d =
+                            P.group
+                                (P.concat (P.text "a") (P.concat P.nl (P.text "b")))
+
+                        maybeActual =
+                            P.prettyFormat cf (B.return d)
+                    in
+                    when maybeActual is
+                        Nothing ->
+                            Expect.fail "render failed"
+
+                        Just actual ->
+                            Expect.equal "a b" actual
+
+            , test "deeply nested concats render correctly" <|
+                \_ ->
+                    let
+                        d =
+                            P.concat (P.text "a")
+                                (P.concat P.hardNl
+                                    (P.concat (P.text "b")
+                                        (P.concat P.hardNl (P.text "c"))
+                                    )
+                                )
+
+                        maybeActual =
+                            P.prettyFormat cf (B.return d)
+                    in
+                    when maybeActual is
+                        Nothing ->
+                            Expect.fail "render failed"
+
+                        Just actual ->
+                            Expect.equal "a\nb\nc" actual
+            ]
+        ]

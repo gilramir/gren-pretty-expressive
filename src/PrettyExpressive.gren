@@ -756,10 +756,20 @@ type Doc cost
       -- ^ A newline. The `Maybe String` is the "flat" alternative used when
       --   `flatten` is applied: `Nothing` means "fail to flatten" (hard
       --   newline); `Just s` means "replace with `text s`".
-    | DocConcat (DocPair cost)
-      -- ^ Unaligned concatenation of two documents.
-    | DocChoice (DocPair cost)
-      -- ^ A choice between two layouts; the renderer picks the lower-cost one.
+    | DocConcat { a : Doc cost, b : Doc cost, nlCnt : Int }
+      -- ^ Unaligned concatenation of two documents. `nlCnt` is the
+      --   pre-computed newline count of the subtree (`nlCntOf a + nlCntOf
+      --   b`), cached at construction so callers — most notably the
+      --   resolver's `DocChoice` branch-order heuristic — don't have to
+      --   re-walk this subtree on every visit. Construct via the smart
+      --   constructor `concat`; never assemble this record directly.
+    | DocChoice { a : Doc cost, b : Doc cost, nlCnt : Int }
+      -- ^ A choice between two layouts; the renderer picks the lower-cost
+      --   one. `nlCnt` is the pre-computed `max (nlCntOf a) (nlCntOf b)`
+      --   — the same pessimistic estimate that the resolver's branch-order
+      --   heuristic would otherwise re-compute on every visit. Construct
+      --   via the smart constructor `choice`; never assemble this record
+      --   directly.
     | DocNest { indent : Int, doc : Doc cost }
       -- ^ Increase indentation by `indent` spaces for the sub-document `doc`.
     | DocAlign (Doc cost)
@@ -884,12 +894,12 @@ For `DocChoice`, the value is the *maximum* of the two branches — the
 choice has not yet been made, and the heuristic that uses this value
 (branch-order in the resolver) wants the pessimistic estimate.
 
-For `DocShared`, the precomputed `nlCnt` field is returned in O(1), so
-queries that cross a share boundary do not re-walk the shared subtree.
-
-Internal nodes that should not appear in user documents (`DocContext`,
-`DocEvaled`) report `0`; `DocBlank` and `DocFail` likewise have no
-newlines.
+`DocConcat`, `DocChoice`, and `DocShared` carry their `nlCnt` as a
+cached field set at construction time, so this function returns in O(1)
+for those nodes regardless of subtree size. For other structural nodes
+the count is computed from the wrapped child. Internal nodes that
+should not appear in user documents (`DocContext`, `DocEvaled`) report
+`0`; `DocBlank` and `DocFail` likewise have no newlines.
 
 -}
 nlCntOf : Doc cost -> Int
@@ -901,11 +911,11 @@ nlCntOf d =
         DocNewline _ ->
             1
 
-        DocConcat { a = a, b = b } ->
-            nlCntOf a + nlCntOf b
+        DocConcat { nlCnt = n } ->
+            n
 
-        DocChoice { a = a, b = b } ->
-            max (nlCntOf a) (nlCntOf b)
+        DocChoice { nlCnt = n } ->
+            n
 
         DocNest { doc = inner } ->
             nlCntOf inner
@@ -1137,7 +1147,7 @@ concat d1 d2 =
             addCost c (concat inner1 d2)
 
         _ ->
-            DocConcat { a = d1, b = d2 }
+            DocConcat { a = d1, b = d2, nlCnt = nlCntOf d1 + nlCntOf d2 }
 
 
 {-| Concatenate an array of documents. This is a helper function
@@ -1174,7 +1184,7 @@ choice d1 d2 =
             d1
 
         _ ->
-            DocChoice { a = d1, b = d2 }
+            DocChoice { a = d1, b = d2, nlCnt = max (nlCntOf d1) (nlCntOf d2) }
 
 
 {-| Increase the indentation level by `n` spaces for the duration of `d`.
