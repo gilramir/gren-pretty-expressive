@@ -105,14 +105,41 @@ from; subsequent visits at the same position hit the memo cache.
 
 ### When sharing actually helps
 
-- Only when the shared value is **referenced more than once** in the
-  resulting tree. One reference: zero benefit.
-- The references must be the same Gren binding, e.g. one `let exitD =
-  ...` used twice. Two independent `P.share (P.text "exit();")` calls
-  produce two different ids.
+- Multi-reference: the shared value is **referenced more than once** in
+  the resulting tree. The references must be the same Gren binding,
+  e.g. one `let exitD = ...` used twice. Two independent `P.share (P.text
+  "exit();")` calls produce two different ids.
+- Single-reference, **post-newline**: see the next subsection — sub-docs
+  immediately after a newline benefit from sharing even when they appear
+  only once in the tree.
 - The win scales with (a) the size of the shared subtree and (b) the
-  number of choice branches that visit it. Shared leaves like `text "x"`
-  rarely pay for themselves.
+  number of paths through the surrounding choice structure that reach it.
+  Shared leaves like `text "x"` rarely pay for themselves.
+
+### Pattern: share post-newline sub-docs
+
+A newline (`P.hardNl`, `P.nl`, or `P.breakDoc`) resets the resolver's
+column to the current indent `i` in its broken form. So whenever a doc
+has the shape `concat newline X`, the inner `X` resolves at `(i, i)`
+regardless of where the outer concat was reached from.
+
+This matters because `processConcat` re-evaluates the right operand
+once per Pareto-optimal measure of the prefix accumulator. Without
+sharing, all those repeats walk `X` fresh — even though every iteration
+produces the same measure set because the newline collapsed the
+column to `i` first. Wrap `X` in `share` to short-circuit every repeat
+to a memo-cache hit:
+
+    P.share body
+        |> B.map (\sharedBody ->
+            P.concat header (P.concat P.hardNl sharedBody)
+        )
+
+Block-structured layouts (indented bodies, vertical lists, anything
+emitting `concat newline subdoc`) are the canonical case. Even though
+`body` appears only once in the tree, the renderer can visit it many
+times from different prefix layouts; sharing collapses those visits to
+one. The deeper the surrounding choice structure, the bigger the win.
 
 ### When you don't need sharing
 

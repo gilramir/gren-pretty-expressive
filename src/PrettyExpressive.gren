@@ -1332,6 +1332,45 @@ branch; with sharing it resolves once. For trivial leaves the win is small,
 but it grows with the size of the shared subtree and the depth of the
 choice structure around it.
 
+## Sharing sub-documents that come right after a newline
+
+There is a second, less obvious case where `share` pays off — one that
+applies even when the shared sub-document appears only once in the tree.
+
+A newline (`hardNl`, `nl`, or `breakDoc`) resets the renderer's column to
+the current indentation `i` in its broken form. Whenever a document has
+the shape `concat newline body`, the renderer's column when it starts
+working on `body` is always `i`, no matter what was on the line before.
+
+The renderer's `concat` handler `processConcat` keeps a Pareto-optimal
+set of layouts for the left operand and re-resolves the right operand
+once for each of those layouts. With many layouts to consider — say,
+inside a wide block whose header line could break at several points —
+the right operand is resolved many times. If the right operand starts
+with a newline, every single one of those resolutions starts working on
+`body` at the same `(column, indent) = (i, i)`. They all produce the
+same answer.
+
+Wrapping `body` in `share` lets the renderer notice this: the first
+resolution stores its answer in the memo cache, and every subsequent
+resolution at the same `(i, i)` looks the answer up instead of
+recomputing. Concretely, anywhere you write
+
+    concat header (concat hardNl body)
+
+consider switching to
+
+    share body
+        |> Builder.map (\sharedBody ->
+            concat header (concat hardNl sharedBody)
+        )
+
+This pattern arises naturally in block-structured layouts: indented
+function bodies, vertical lists, the body of any `if`/`when`/`case` arm
+whose content is laid out after a newline. The bigger `body` is, and
+the more layouts the renderer is considering for the surrounding
+context, the more sharing it saves you.
+
 The `nlCnt` of the inner document is computed at share time and cached on
 the `DocShared` node, so the resolver's branch-order heuristic in
 `DocChoice` does not need to re-walk the shared subtree on every visit.
