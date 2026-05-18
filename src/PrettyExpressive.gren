@@ -1401,7 +1401,26 @@ flatten d =
             concat (flatten d1) (flatten d2)
 
         DocChoice { a = d1, b = d2 } ->
-            choice (flatten d1) (flatten d2)
+            -- Flattening a group `choice d (flatten d)` produces
+            -- `choice (flatten d) (flatten (flatten d))`, which collapses to
+            -- `choice (flatten d) (flatten d)` because `flatten` is idempotent.
+            -- The two branches are then structurally identical, but the
+            -- `choice` smart constructor only dedupes on `DocFail`, so the
+            -- renderer would otherwise explore both branches and merge
+            -- identical measure sets — wasted work that compounds
+            -- exponentially when groups are nested. Dedupe here.
+            let
+                fa =
+                    flatten d1
+
+                fb =
+                    flatten d2
+            in
+            if docStructEqual fa fb then
+                fa
+
+            else
+                choice fa fb
 
         DocNest { indent = _, doc = inner } ->
             -- Indentation is irrelevant in a flat document; drop the wrapper.
@@ -1434,6 +1453,53 @@ flatten d =
             -- different. Callers that want the flattened form to be shared
             -- can `share` the result themselves.
             flatten inner
+
+
+{-| Structural equality on `Doc cost`. Used by `flatten`'s `DocChoice` case
+to dedupe choice branches that collapse to the same value after flattening.
+
+Conservative: returns `False` for `DocAddCost` (the `cost` type parameter is
+not comparable here), `DocContext` (carries a function), and the internal
+`DocBlank` / `DocTwoColumns` / `DocEvaled` nodes. Mismatched top-level
+constructors also yield `False`. These conservative results never produce an
+incorrect render — they only forfeit a dedup opportunity.
+
+`DocShared` nodes compare by id alone: the `Builder` guarantees ids are
+unique per inner document, so equal ids imply equal subtrees.
+
+-}
+docStructEqual : Doc cost -> Doc cost -> Bool
+docStructEqual d1 d2 =
+    when { d1 = d1, d2 = d2 } is
+        { d1 = DocText t1, d2 = DocText t2 } ->
+            t1.string == t2.string && t1.width == t2.width
+
+        { d1 = DocNewline n1, d2 = DocNewline n2 } ->
+            n1 == n2
+
+        { d1 = DocFail, d2 = DocFail } ->
+            True
+
+        { d1 = DocConcat c1, d2 = DocConcat c2 } ->
+            docStructEqual c1.a c2.a && docStructEqual c1.b c2.b
+
+        { d1 = DocChoice c1, d2 = DocChoice c2 } ->
+            docStructEqual c1.a c2.a && docStructEqual c1.b c2.b
+
+        { d1 = DocNest n1, d2 = DocNest n2 } ->
+            n1.indent == n2.indent && docStructEqual n1.doc n2.doc
+
+        { d1 = DocAlign a1, d2 = DocAlign a2 } ->
+            docStructEqual a1 a2
+
+        { d1 = DocReset r1, d2 = DocReset r2 } ->
+            docStructEqual r1 r2
+
+        { d1 = DocShared s1, d2 = DocShared s2 } ->
+            s1.id == s2.id
+
+        _ ->
+            False
 
 
 {-| Try the document as-is; fall back to its flattened form if that is cheaper.
