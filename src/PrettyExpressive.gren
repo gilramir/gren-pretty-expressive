@@ -1664,8 +1664,16 @@ the separator).
     the separator from the left edge. This breaks ties in favour of the
     leftmost (tightest) valid separator.
 
+**Why this returns a `Builder`:** the separator search reconstructs the
+table once per candidate separator column, embedding every row's right
+cell `b` in the resulting `DocChoice` tree. Without sharing, the renderer
+would re-walk each `b` from scratch for every candidate. Wrapping each
+non-trivial `b` in `share` lets the renderer's memo cache short-circuit
+repeated visits at the same `(c, i)`. Trivial right cells (text, newline,
+fail) skip the share since the wrap costs more than the leaf measure.
+
 -}
-twoColumns : Array (DocPair cost) -> Doc cost
+twoColumns : Array (DocPair cost) -> Builder (Doc cost)
 twoColumns ds =
     let
         isFail d =
@@ -1681,18 +1689,75 @@ twoColumns ds =
     in
     when popped is
         Nothing ->
-            empty
+            Builder.return empty
 
         Just { first = first, rest = rest } ->
             if Array.isEmpty rest then
                 -- Single row: simple aligned concatenation, no separator search.
-                align (concat first.a first.b)
+                Builder.return (align (concat first.a first.b))
 
             else if Array.any (\pair -> isFail pair.a || isFail pair.b) ds then
-                DocFail
+                Builder.return DocFail
 
             else
-                DocTwoColumns ds
+                shareNonTrivialRightCells ds
+                    |> Builder.map DocTwoColumns
+
+
+{-| `True` if wrapping `d` in `share` is likely to pay for itself.
+
+Leaf nodes (`DocText`, `DocNewline`, `DocFail`, `DocBlank`) have O(1)
+measure resolution, so the memo lookup overhead exceeds the saving.
+`DocShared` is already shared. Everything else is large enough that the
+saving from a cache hit dominates the lookup cost.
+
+-}
+shouldShare : Doc cost -> Bool
+shouldShare d =
+    when d is
+        DocText _ ->
+            False
+
+        DocNewline _ ->
+            False
+
+        DocFail ->
+            False
+
+        DocBlank _ ->
+            False
+
+        DocShared _ ->
+            False
+
+        _ ->
+            True
+
+
+{-| Walk an array of row pairs, replacing each non-trivial `b` with its
+shared counterpart. Trivial right cells (per `shouldShare`) are passed
+through unchanged.
+-}
+shareNonTrivialRightCells : Array (DocPair cost) -> Builder (Array (DocPair cost))
+shareNonTrivialRightCells ds =
+    Array.foldl
+        (\pair accBuilder ->
+            accBuilder
+                |> Builder.andThen
+                    (\acc ->
+                        if shouldShare pair.b then
+                            share pair.b
+                                |> Builder.map
+                                    (\sharedB ->
+                                        Array.pushLast { a = pair.a, b = sharedB } acc
+                                    )
+
+                        else
+                            Builder.return (Array.pushLast pair acc)
+                    )
+        )
+        (Builder.return [])
+        ds
 
 
 

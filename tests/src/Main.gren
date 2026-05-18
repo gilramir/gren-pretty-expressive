@@ -10,6 +10,7 @@ import FlattenDedup
 import JsonTest
 import OCamlExamples
 import OCamlTests
+import TwoColumnsShare
 import ViewItemsTest
 
 main : Program
@@ -22,5 +23,6 @@ main =
             , JsonTest.suite
             , OCamlExamples.suite
             , OCamlTests.suite
+            , TwoColumnsShare.suite
             , ViewItemsTest.suite
             ]

@@ -743,7 +743,7 @@ suite =
                 [ test "twoColumns: empty array renders as empty" <|
                     \_ ->
                         let
-                            maybeActual = P.prettyFormat cf80 (B.return (P.twoColumns []))
+                            maybeActual = P.prettyFormat cf80 (P.twoColumns [])
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -754,8 +754,9 @@ suite =
                         -- One row does not trigger the separator search; it
                         -- degenerates to align (concat a b).
                         let
-                            d = P.twoColumns [ { a = P.text "key", b = P.text " = value" } ]
-                            maybeActual = P.prettyFormat cf80 (B.return d)
+                            maybeActual =
+                                P.prettyFormat cf80
+                                    (P.twoColumns [ { a = P.text "key", b = P.text " = value" } ])
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -770,11 +771,13 @@ suite =
                         --   row 1: "a" + 1 space padding + "111" = "a 111"
                         --   row 2: "bb" + 0 padding      + "222" = "bb222"
                         let
-                            d = P.twoColumns
-                                    [ { a = P.text "a",  b = P.text "111" }
-                                    , { a = P.text "bb", b = P.text "222" }
-                                    ]
-                            maybeActual = P.prettyFormat cf80 (B.return d)
+                            maybeActual =
+                                P.prettyFormat cf80
+                                    (P.twoColumns
+                                        [ { a = P.text "a",  b = P.text "111" }
+                                        , { a = P.text "bb", b = P.text "222" }
+                                        ]
+                                    )
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -789,12 +792,14 @@ suite =
                         --   "age"  + 1 pad + ": 30"   = "age : 30"
                         --   "city" + 0 pad + ": NYC"  = "city: NYC"
                         let
-                            d = P.twoColumns
-                                    [ { a = P.text "name", b = P.text ": Alice" }
-                                    , { a = P.text "age",  b = P.text ": 30" }
-                                    , { a = P.text "city", b = P.text ": NYC" }
-                                    ]
-                            maybeActual = P.prettyFormat cf80 (B.return d)
+                            maybeActual =
+                                P.prettyFormat cf80
+                                    (P.twoColumns
+                                        [ { a = P.text "name", b = P.text ": Alice" }
+                                        , { a = P.text "age",  b = P.text ": 30" }
+                                        , { a = P.text "city", b = P.text ": NYC" }
+                                        ]
+                                    )
                         in
                             when maybeActual is
                                 Nothing -> Expect.fail "document failed to render"
@@ -803,11 +808,13 @@ suite =
                 , test "twoColumns: a failDoc in any cell makes the whole doc fail" <|
                     \_ ->
                         let
-                            d = P.twoColumns
-                                    [ { a = P.text "ok",   b = P.text "fine" }
-                                    , { a = P.failDoc,     b = P.text "bad"  }
-                                    ]
-                            maybeActual = P.prettyFormat cf80 (B.return d)
+                            maybeActual =
+                                P.prettyFormat cf80
+                                    (P.twoColumns
+                                        [ { a = P.text "ok",   b = P.text "fine" }
+                                        , { a = P.failDoc,     b = P.text "bad"  }
+                                        ]
+                                    )
                         in
                             when maybeActual is
                                 Nothing -> Expect.pass

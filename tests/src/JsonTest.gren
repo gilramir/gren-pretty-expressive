@@ -4,6 +4,7 @@ import Expect
 import Test exposing (..)
 
 import PrettyExpressive as P
+import PrettyExpressive.Builder as B
 import PrettyExpressive.Json as J
 
 
@@ -85,15 +86,20 @@ suite =
                     "{\"type\":\"addCost\",\"doc\":{\"type\":\"newline\",\"flatForm\":\" \"}}"
                     (J.docToJson (P.addCost cost P.nl))
 
-        , test "twoColumns" <|
+        , test "twoColumns (trivial right cells are not shared)" <|
             \_ ->
+                -- Single-character `b` cells are leaves; the smart constructor
+                -- skips wrapping them in `share` because the memo lookup costs
+                -- more than the leaf measure.
                 Expect.equal
                     "{\"type\":\"twoColumns\",\"rows\":[{\"a\":{\"type\":\"text\",\"string\":\"x\",\"width\":1},\"b\":{\"type\":\"text\",\"string\":\"y\",\"width\":1}},{\"a\":{\"type\":\"text\",\"string\":\"aa\",\"width\":2},\"b\":{\"type\":\"text\",\"string\":\"bb\",\"width\":2}}]}"
                     (J.docToJson
-                        (P.twoColumns
-                            [ { a = P.text "x", b = P.text "y" }
-                            , { a = P.text "aa", b = P.text "bb" }
-                            ]
+                        (B.run
+                            (P.twoColumns
+                                [ { a = P.text "x", b = P.text "y" }
+                                , { a = P.text "aa", b = P.text "bb" }
+                                ]
+                            )
                         )
                     )
 

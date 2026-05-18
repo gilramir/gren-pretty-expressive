@@ -1,0 +1,243 @@
+module TwoColumnsShare exposing (suite)
+
+{-| Tests for `twoColumns`'s sharing of right cells.
+
+`doTwoColumns` reconstructs the table once per candidate separator column,
+embedding each row's right cell `b` in the resulting `DocChoice` tree.
+Without sharing, the renderer re-walks every `b` from scratch for each
+candidate, even when many candidates produce the same starting column for
+that cell. Wrapping non-trivial `b` values in `share` lets the memo cache
+short-circuit those repeated visits.
+
+The smart constructor skips trivial `b` values (text, newline, fail,
+blank, already-shared) because the wrap overhead exceeds the leaf
+measure cost.
+
+-}
+
+import Expect exposing (Expectation)
+import Test exposing (Test, describe, test)
+
+import PrettyExpressive as P
+import PrettyExpressive exposing (Doc(..))
+import PrettyExpressive.Builder as B
+
+
+-- ----------------------------------------------------------------------------
+-- Helpers
+-- ----------------------------------------------------------------------------
+
+
+cf : P.CostFactory P.DefaultCostTuple
+cf =
+    P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+
+{-| Count `DocShared` nodes in a Doc tree. Used to verify that
+`twoColumns` wraps non-trivial right cells and leaves trivial ones alone.
+-}
+countShares : Doc cost -> Int
+countShares d =
+    when d is
+        DocShared { doc = inner } ->
+            1 + countShares inner
+
+        DocConcat { a = a, b = b } ->
+            countShares a + countShares b
+
+        DocChoice { a = a, b = b } ->
+            countShares a + countShares b
+
+        DocNest { doc = inner } ->
+            countShares inner
+
+        DocAlign inner ->
+            countShares inner
+
+        DocReset inner ->
+            countShares inner
+
+        DocAddCost { doc = inner } ->
+            countShares inner
+
+        DocTwoColumns pairs ->
+            Array.foldl (\p acc -> acc + countShares p.a + countShares p.b) 0 pairs
+
+        _ ->
+            0
+
+
+-- ----------------------------------------------------------------------------
+-- Tests
+-- ----------------------------------------------------------------------------
+
+
+suite : Test
+suite =
+    describe "twoColumns: shared right cells"
+        [ describe "structural"
+
+            [ test "trivial text right cells are not wrapped in DocShared" <|
+                \_ ->
+                    -- All `b` values are plain text → wrap overhead > savings,
+                    -- so the smart constructor leaves them alone.
+                    let
+                        doc =
+                            B.run
+                                (P.twoColumns
+                                    [ { a = P.text "name", b = P.text ": Alice" }
+                                    , { a = P.text "age",  b = P.text ": 30" }
+                                    , { a = P.text "city", b = P.text ": NYC" }
+                                    ]
+                                )
+                    in
+                    Expect.equal 0 (countShares doc)
+
+            , test "non-trivial right cells (concat with newline) are shared" <|
+                \_ ->
+                    -- Each `b` is `concat (text ":") (concat hardNl (text "..."))`
+                    -- — a non-leaf, so the smart constructor wraps it in share.
+                    -- Three rows → three DocShared nodes.
+                    let
+                        makeB v =
+                            P.concat (P.text ":") (P.concat P.hardNl (P.text v))
+
+                        doc =
+                            B.run
+                                (P.twoColumns
+                                    [ { a = P.text "name", b = makeB "Alice" }
+                                    , { a = P.text "age",  b = makeB "30" }
+                                    , { a = P.text "city", b = makeB "NYC" }
+                                    ]
+                                )
+                    in
+                    Expect.equal 3 (countShares doc)
+
+            , test "already-shared right cells are not double-wrapped" <|
+                \_ ->
+                    -- If the caller passes in a pre-shared `b`, the smart
+                    -- constructor sees it as a leaf (shouldShare returns False
+                    -- for DocShared) and skips the extra wrap. Net: one
+                    -- DocShared per row, not two.
+                    let
+                        innerBuilder =
+                            P.share (P.concat (P.text "v") P.hardNl)
+
+                        docBuilder =
+                            innerBuilder
+                                |> B.andThen
+                                    (\sharedB ->
+                                        P.twoColumns
+                                            [ { a = P.text "a", b = sharedB }
+                                            , { a = P.text "b", b = sharedB }
+                                            ]
+                                    )
+
+                        doc =
+                            B.run docBuilder
+                    in
+                    -- Two references to the same shared node + zero new wraps.
+                    -- countShares counts references that pass through DocShared,
+                    -- so the same id is counted twice here. Verifying we
+                    -- haven't *added* a wrapper means the count is 2, not 4.
+                    Expect.equal 2 (countShares doc)
+
+            , test "single-row degenerate case has no DocShared" <|
+                \_ ->
+                    -- One row collapses to `align (concat a b)` without
+                    -- entering the separator-search path that motivated the
+                    -- sharing in the first place.
+                    let
+                        doc =
+                            B.run
+                                (P.twoColumns
+                                    [ { a = P.text "key"
+                                      , b = P.concat (P.text "=") (P.concat P.hardNl (P.text "value"))
+                                      }
+                                    ]
+                                )
+                    in
+                    Expect.equal 0 (countShares doc)
+
+            , test "empty table renders without DocShared" <|
+                \_ ->
+                    let
+                        doc =
+                            B.run (P.twoColumns [])
+                    in
+                    Expect.equal 0 (countShares doc)
+            ]
+
+        , describe "render correctness (sharing preserves output)"
+
+            [ test "trivial right cells render the same as without sharing" <|
+                \_ ->
+                    -- Sanity: the existing three-row text case still produces
+                    -- the same expected output.
+                    let
+                        maybeActual =
+                            P.prettyFormat cf
+                                (P.twoColumns
+                                    [ { a = P.text "name", b = P.text ": Alice" }
+                                    , { a = P.text "age",  b = P.text ": 30" }
+                                    , { a = P.text "city", b = P.text ": NYC" }
+                                    ]
+                                )
+                    in
+                    when maybeActual is
+                        Nothing ->
+                            Expect.fail "document failed to render"
+
+                        Just actual ->
+                            Expect.equal "name: Alice\nage : 30\ncity: NYC" actual
+
+            , test "non-trivial right cells render the multi-line layout" <|
+                \_ ->
+                    -- Each row's b spans two lines (hardNl in the middle).
+                    -- The separator search still picks the widest left cell
+                    -- as the separator column, and the inner hardNl breaks
+                    -- the right cell as expected.
+                    let
+                        makeB v =
+                            P.concat (P.text ":") (P.concat P.hardNl (P.text v))
+
+                        maybeActual =
+                            P.prettyFormat cf
+                                (P.twoColumns
+                                    [ { a = P.text "ab", b = makeB "x" }
+                                    , { a = P.text "cd", b = makeB "y" }
+                                    ]
+                                )
+                    in
+                    when maybeActual is
+                        Nothing ->
+                            Expect.fail "document failed to render"
+
+                        Just actual ->
+                            -- Both `a` cells are width 2, so separator = 2.
+                            -- Row 1: "ab" + 0pad + ":\nx"
+                            -- Row 2: "cd" + 0pad + ":\ny"
+                            -- The inner hardNl puts the value on its own line,
+                            -- aligned to the indent (column 0 for an
+                            -- unaligned table at the top level).
+                            Expect.equal "ab:\nx\ncd:\ny" actual
+
+            , test "failDoc in any cell still causes render to fail" <|
+                \_ ->
+                    let
+                        maybeActual =
+                            P.prettyFormat cf
+                                (P.twoColumns
+                                    [ { a = P.text "ok", b = P.text "fine" }
+                                    , { a = P.failDoc,   b = P.text "bad" }
+                                    ]
+                                )
+                    in
+                    when maybeActual is
+                        Nothing ->
+                            Expect.pass
+
+                        Just _ ->
+                            Expect.fail "expected render to fail"
+            ]
+        ]
