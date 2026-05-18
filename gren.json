@@ -7,6 +7,7 @@
     "version": "1.2.0",
     "exposed-modules": [
         "PrettyExpressive",
+        "PrettyExpressive.Builder",
         "PrettyExpressive.Debug",
         "PrettyExpressive.Json"
     ],
