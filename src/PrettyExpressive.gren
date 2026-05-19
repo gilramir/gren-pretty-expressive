@@ -1574,8 +1574,32 @@ flatten d =
             -- Soft newline: replace with its designated flat-form string.
             text s
 
-        DocConcat { a = d1, b = d2 } ->
-            concat (flatten d1) (flatten d2)
+        DocConcat _ ->
+            -- Unroll the left-leaning DocConcat chain into a leftmost element
+            -- plus an array of right operands, then flatten iteratively. A
+            -- naive `concat (flatten d1) (flatten d2)` recurses through d1
+            -- once per chain level, so a document built via `Array.foldl
+            -- P.concat` over a long array overflows the JS call stack when
+            -- it's wrapped in `group` (which calls `flatten` at construction
+            -- time). The unroll uses a tail-recursive walk (Gren TCO → JS
+            -- loop) and the iterative fold rebuilds the flattened doc with
+            -- no per-level recursion. Behaviour is identical to the
+            -- recursive version because `concat` is associative and the
+            -- right-operand sub-docs are still flattened individually.
+            let
+                unrolled =
+                    unrollLeftConcatChain d []
+
+                flatLeftmost =
+                    flatten unrolled.leftmost
+            in
+            -- `rights` is in reverse source order; `foldr` visits it
+            -- right-to-left (= source order), threading `concat` to
+            -- rebuild a flattened left-leaning chain.
+            Array.foldr
+                (\dRight acc -> concat acc (flatten dRight))
+                flatLeftmost
+                unrolled.rights
 
         DocChoice { a = d1, b = d2 } ->
             -- Flattening a group `choice d (flatten d)` produces
@@ -1657,8 +1681,30 @@ docStructEqual d1 d2 =
         { d1 = DocFail, d2 = DocFail } ->
             True
 
-        { d1 = DocConcat c1, d2 = DocConcat c2 } ->
-            docStructEqual c1.a c2.a && docStructEqual c1.b c2.b
+        { d1 = DocConcat _, d2 = DocConcat _ } ->
+            -- Unroll both left-leaning chains, length-check, then compare
+            -- leftmosts and rights pairwise. A naive recursive
+            -- `docStructEqual c1.a c2.a && docStructEqual c1.b c2.b` walks
+            -- both chains in lock-step, but its recursion depth equals the
+            -- chain depth — the same shape that overflows the stack in
+            -- `flatten`'s naive form. Iterating over the unrolled rights
+            -- arrays via `Array.map2` (kernel-level JS loop) is stack-safe.
+            let
+                u1 =
+                    unrollLeftConcatChain d1 []
+
+                u2 =
+                    unrollLeftConcatChain d2 []
+            in
+            if Array.length u1.rights /= Array.length u2.rights then
+                False
+
+            else if not (docStructEqual u1.leftmost u2.leftmost) then
+                False
+
+            else
+                Array.map2 docStructEqual u1.rights u2.rights
+                    |> Array.foldl (\b acc -> acc && b) True
 
         { d1 = DocChoice c1, d2 = DocChoice c2 } ->
             docStructEqual c1.a c2.a && docStructEqual c1.b c2.b

@@ -120,4 +120,60 @@ suite =
 
                     Just _ ->
                         Expect.pass
+
+        , test "group of a 5000-pair chain does not overflow flatten's recursion" <|
+            \_ ->
+                -- `P.group d` calls `flatten d` at construction time. A
+                -- naive recursive `flatten` walks the same left spine
+                -- `resolve` used to, so the same chain depth that crashed
+                -- the recursive resolver also crashed flatten. The
+                -- iterative flatten unrolls the left chain just like
+                -- resolve does. This test pins that down by constructing
+                -- a group around a deep chain — building the group must
+                -- complete without stack overflow, and the result must
+                -- render correctly.
+                let
+                    d =
+                        P.group (leftLeaningChain (textAndNewlinePairs 5000))
+
+                    maybeActual =
+                        P.prettyFormat cf (B.return d)
+                in
+                when maybeActual is
+                    Nothing ->
+                        Expect.fail "render failed"
+
+                    Just _ ->
+                        Expect.pass
+
+        , test "docStructEqual on two deep parallel chains does not overflow" <|
+            \_ ->
+                -- `docStructEqual` is called from `flatten`'s DocChoice arm
+                -- on two branches that are typically structurally identical
+                -- (because `flatten` is idempotent). For deep parallel
+                -- chains the naive recursive comparison walks the same
+                -- spine depth that flattened-resolve used to crash on. The
+                -- iterative version unrolls both spines and compares the
+                -- rights arrays pairwise.
+                --
+                -- We exercise this by building `P.group (P.group d)` where
+                -- d is a deep chain. Flattening the outer group produces
+                -- a DocChoice whose branches are `flatten d` and `flatten
+                -- (flatten d)` — identical by idempotence — and the
+                -- DocChoice arm of flatten then calls docStructEqual on
+                -- them. If docStructEqual's recursion overflows the
+                -- stack, the construction will throw.
+                let
+                    d =
+                        P.group (P.group (leftLeaningChain (textAndNewlinePairs 5000)))
+
+                    maybeActual =
+                        P.prettyFormat cf (B.return d)
+                in
+                when maybeActual is
+                    Nothing ->
+                        Expect.fail "render failed"
+
+                    Just _ ->
+                        Expect.pass
         ]
