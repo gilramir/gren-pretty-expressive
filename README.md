@@ -1,7 +1,7 @@
 # Pretty Expressive Printer
 
-A Gren implementation of the Pretty Expressive Printer, ported
-from the OCaml implementation.
+A Gren implementation of the
+[Pretty Expressive Printer](https://arxiv.org/pdf/2310.01530).
 
 This library implements an *optimal* pretty printer. Given a page-width limit
 and a cost model, it searches all possible layouts and selects the one with
