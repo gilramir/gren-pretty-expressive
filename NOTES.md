@@ -84,3 +84,81 @@ when both branches are `DocText` with equal contents, or both are the same
 `DocShared` id. That catches the common trivial-already-flat case without
 walking deep subtrees. Implementation hint: pattern-match on the two-branch
 shape directly in `choice` before falling back to the full `docStructEqual`.
+
+---
+
+## Deferred: remaining stack-safety hot spots
+
+Three recursive code paths could in principle overflow Node's call stack
+on synthetic or pathological inputs. None has been observed in real
+workloads (including the gren-format formatter on a 4485-line embedded-
+JSON file, the original repro). They share the same shape as the
+already-fixed `resolve` / `flatten` / `docStructEqual` DocConcat arms
+(left-spine recursion bounded by chain depth), and the same fix
+technique (unroll the spine via `unrollLeftConcatChain`, then iterate)
+would apply mechanically.
+
+### `resolve`'s `DocChoice` arm
+
+```gren
+DocChoice { a = d1, b = d2 } ->
+    let
+        useReverseOrder = nlCntOf d1 < nlCntOf d2
+        ...
+        r1 = self firstD c i memo
+        r2 = self secondD c i r1.memo
+    in
+    ...
+```
+
+Recursion depth equals the *nesting depth* of explicit `P.choice` (or
+`P.group`) nodes. Idiomatic user code keeps this shallow because
+Pareto pruning bounds the frontier — but `doTwoColumns` constructs a
+deeply nested `DocChoice` tree internally (see below), which is the
+realistic path to hitting this in practice.
+
+Fix shape: same as the DocConcat unroll, but the iteration would need
+to merge measure sets across all branches rather than appending them.
+Materially more complex than the DocConcat case.
+
+### `doTwoColumns`' choice tree
+
+The separator search builds a `DocChoice` tree of depth roughly
+`rows * measures-per-row`. The resolver then walks that tree via the
+DocChoice arm above, so a table with thousands of rows could overflow.
+Real-world tables (record-field alignment, struct definitions, oncall
+schedules) almost never approach this size — but a generated-code
+caller could.
+
+Two fix options:
+  1. Build the choice tree *balanced* rather than spine-leaning. The
+     existing construction recurses through `loopLimit` and
+     `innerLoop`; both produce left-leaning choice chains.
+  2. Convert the separator search to an iterative loop that maintains
+     the running-best measure set directly, skipping the choice-tree
+     construction entirely. This is the cleaner long-term design and
+     would also let us share more across separator candidates.
+
+### `resolve` / `flatten` on wrapper chains
+
+`DocNest`, `DocAlign`, `DocReset`, and `DocAddCost` each recurse into
+their single child. A user-built chain like
+`P.nest 4 (P.nest 4 (P.nest 4 (...)))` 5000 levels deep would
+overflow. No idiomatic Gren code produces such a chain — `nest`
+typically wraps one logical block at a time, and the smart
+constructors don't auto-collapse adjacent wrappers — but a code
+generator targeting the API could conceivably build them.
+
+Fix shape: a tail-recursive "unwrap chain" helper analogous to
+`unrollLeftConcatChain`, returning the leaf doc plus an accumulator
+of (indent | align | reset | cost-tag) entries to re-apply.
+Significantly more variant cases than the DocConcat unroll; only
+worth doing if a real workload reports it.
+
+### When to revisit
+
+The same trigger as #1: a real workload reports stack overflow on
+input the recursive form can't handle. The fixes are mechanical
+extensions of patterns already in the codebase. Until then, the
+existing `StackSafety` test suite covers the cases that have actually
+been hit in practice.
