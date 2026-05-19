@@ -11,6 +11,7 @@ import JsonTest
 import NlCntCaching
 import OCamlExamples
 import OCamlTests
+import StackSafety
 import TwoColumnsShare
 import ViewItemsTest
 
@@ -25,6 +26,7 @@ main =
             , NlCntCaching.suite
             , OCamlExamples.suite
             , OCamlTests.suite
+            , StackSafety.suite
             , TwoColumnsShare.suite
             , ViewItemsTest.suite
             ]

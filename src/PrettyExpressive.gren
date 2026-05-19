@@ -887,6 +887,40 @@ memoKey id_ c i =
     String.fromInt id_ ++ ":" ++ String.fromInt c ++ ":" ++ String.fromInt i
 
 
+{-| Walk down the left spine of a `DocConcat` chain, returning the leftmost
+non-DocConcat node and the array of right operands collected along the way
+(in *reverse* source order).
+
+For a doc of shape `concat (concat (concat A B) C) D` this returns:
+
+    { leftmost = A, rights = [D, C, B] }
+
+The caller is expected to consume `rights` with `Array.foldr` (which
+visits right-to-left, hence source order: B then C then D).
+
+The walk is tail-recursive in its first argument — Gren compiles
+self-tail-calls into a JavaScript loop, so the recursion uses constant
+stack space even for very long chains. This is the property the
+resolver's `DocConcat` arm relies on to avoid blowing the call stack on
+docs built via `Array.foldl P.concat` over thousands of elements.
+
+The accumulator argument is exposed so the function is its own tail
+helper; callers should always pass an empty array.
+
+-}
+unrollLeftConcatChain :
+    Doc cost
+    -> Array (Doc cost)
+    -> { leftmost : Doc cost, rights : Array (Doc cost) }
+unrollLeftConcatChain doc accRights =
+    when doc is
+        DocConcat { a = a, b = b } ->
+            unrollLeftConcatChain a (Array.pushLast b accRights)
+
+        _ ->
+            { leftmost = doc, rights = accRights }
+
+
 {-| Count newlines in a document subtree.
 
 The result is exact for newline nodes and recursively summed for compounds.
@@ -2411,17 +2445,45 @@ resolve cf doc c i memo =
                             ]
                         )
 
-                DocConcat { a = d1, b = d2 } ->
-                    -- Evaluate the left operand, then for each resulting measure
-                    -- evaluate the right operand starting at m1.last.
+                DocConcat _ ->
+                    -- Unroll the left-leaning DocConcat chain into a leftmost
+                    -- element plus an array of right operands, then resolve
+                    -- iteratively. A naive recursive implementation
+                    -- (`self d1 c i memo` followed by `processConcat ... d2`)
+                    -- would push one stack frame per chain level, overflowing
+                    -- the JS call stack for documents built via
+                    -- `Array.foldl P.concat` over a long array (e.g. a
+                    -- triple-quoted string with thousands of lines). The
+                    -- unroll uses a tail-recursive walk (Gren compiles
+                    -- self-tail-calls into a JS loop) and the iterative fold
+                    -- threads measure-set / memo state through with no
+                    -- per-level recursion. Behaviour is identical to the
+                    -- recursive version because `concat` is associative and
+                    -- the same `(c, i)` is used for the leftmost.
                     let
-                        left =
-                            self d1 c i memo
+                        unrolled =
+                            unrollLeftConcatChain doc []
+
+                        leftmost =
+                            unrolled.leftmost
+
+                        rights =
+                            unrolled.rights
+
+                        leftResult =
+                            self leftmost c i memo
+
+                        accumOne dRight accResolved =
+                            processConcat cf
+                                (\m1 mLocal -> self dRight m1.last i mLocal)
+                                accResolved.ms
+                                accResolved.memo
                     in
-                    processConcat cf
-                        (\m1 mLocal -> self d2 m1.last i mLocal)
-                        left.ms
-                        left.memo
+                    -- `rights` is in reverse source order (each right operand
+                    -- was `pushLast`-ed as the unroll descended). `foldr`
+                    -- visits it right-to-left, which is source order: B then
+                    -- C then D for a chain `(((A B) C) D)`.
+                    Array.foldr accumOne leftResult rights
 
                 DocChoice { a = d1, b = d2 } ->
                     -- Evaluate both branches and merge their measure sets.

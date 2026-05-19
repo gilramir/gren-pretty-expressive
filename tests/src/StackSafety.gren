@@ -1,0 +1,123 @@
+module StackSafety exposing (suite)
+
+{-| Tests that `resolve` does not overflow the JavaScript call stack on
+deeply-nested document trees.
+
+The resolver's `DocConcat` arm walks down the left spine of a chain of
+DocConcat nodes; a naive recursive implementation pushes one stack frame
+per chain level. Documents built via `Array.foldl P.concat` over a long
+array (a common idiom — e.g. assembling a multi-line string body from
+its lines) produce a chain whose depth equals the array length, and
+Node's default stack runs out somewhere past ~1000 frames.
+
+The fix is to unroll the chain into an iterative pass. These tests pin
+that down by building chains far longer than the recursive version could
+ever survive and asserting the renderer completes with the expected
+output.
+
+-}
+
+import Expect exposing (Expectation)
+import Test exposing (Test, describe, test)
+
+import PrettyExpressive as P
+import PrettyExpressive.Builder as B
+
+
+cf : P.CostFactory P.DefaultCostTuple
+cf =
+    P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+
+{-| Build a doc of the form `concat (concat (concat A B) C) D` etc. by
+`Array.foldl P.concat` — exactly the pattern that triggers the deep
+left-leaning chain.
+-}
+leftLeaningChain : Array (P.Doc P.DefaultCostTuple) -> P.Doc P.DefaultCostTuple
+leftLeaningChain pieces =
+    when Array.popFirst pieces is
+        Nothing ->
+            P.empty
+
+        Just { first, rest } ->
+            Array.foldl (\piece acc -> P.concat acc piece) first rest
+
+
+{-| Build N text-and-hardNl pairs, alternating so the smart constructor
+doesn't fuse anything: `[text "x", hardNl, text "x", hardNl, ...]`.
+
+Using `hardNl` here means each pair survives concat's text-fusion
+normalization, so the resulting doc is a genuine left-leaning chain of
+length `2 * N`.
+-}
+textAndNewlinePairs : Int -> Array (P.Doc P.DefaultCostTuple)
+textAndNewlinePairs n =
+    Array.range 1 n
+        |> Array.map (\_ -> [ P.text "x", P.hardNl ])
+        |> Array.flatten
+
+
+suite : Test
+suite =
+    describe "resolve: stack safety on deep left-leaning DocConcat chains"
+        [ test "5000-pair (10000-element) left-leaning chain renders without crash" <|
+            \_ ->
+                -- A recursive `DocConcat` resolver overflows JS's call stack
+                -- somewhere around 1000-1500 chain levels on Node. 10000
+                -- elements is well past any plausible threshold; if this
+                -- completes at all, the iterative resolve is doing its job.
+                let
+                    d =
+                        leftLeaningChain (textAndNewlinePairs 5000)
+
+                    maybeActual =
+                        P.prettyFormat cf (B.return d)
+                in
+                when maybeActual is
+                    Nothing ->
+                        Expect.fail "render failed (returned Nothing)"
+
+                    Just _ ->
+                        Expect.pass
+
+        , test "rendered output has 5000 'x' characters" <|
+            \_ ->
+                -- Sanity: not only did the render complete, it traversed
+                -- the whole chain — every `text "x"` shows up in the output.
+                let
+                    d =
+                        leftLeaningChain (textAndNewlinePairs 5000)
+
+                    maybeActual =
+                        P.prettyFormat cf (B.return d)
+
+                    xCount s =
+                        s
+                            |> String.split ""
+                            |> Array.foldl
+                                (\ch n -> if ch == "x" then n + 1 else n)
+                                0
+                in
+                when maybeActual is
+                    Nothing ->
+                        Expect.fail "render failed"
+
+                    Just actual ->
+                        Expect.equal 5000 (xCount actual)
+
+        , test "10000-pair (20000-element) chain renders (an order of magnitude past recursive overflow)" <|
+            \_ ->
+                let
+                    d =
+                        leftLeaningChain (textAndNewlinePairs 10000)
+
+                    maybeActual =
+                        P.prettyFormat cf (B.return d)
+                in
+                when maybeActual is
+                    Nothing ->
+                        Expect.fail "render failed"
+
+                    Just _ ->
+                        Expect.pass
+        ]
