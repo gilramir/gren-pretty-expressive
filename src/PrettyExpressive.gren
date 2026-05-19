@@ -50,10 +50,12 @@ module PrettyExpressive exposing
 {-|
 # Usage
 
-## Step 1: Implement a CostFactory.
+## Step 1: Get a CostFactory.
 
-PrettyExpressive provides a default implementation, but you can implement
-your own.
+A `CostFactory` defines how the printer measures "good" and "bad"
+layouts. For most use cases the bundled `defaultCostFactory` is what
+you want — give it a page width and you're done. (Building a custom
+one is an advanced fall-through; see the `CostFactory` docs.)
 
     import PrettyExpressive as P
     import PrettyExpressive.Builder as B
@@ -151,6 +153,41 @@ than silently picking a wrong layout.
 In practice, only one thing causes a document to fail: every branch
 of every `choice` in the document must contain a `failDoc` or evaluate
 to one.
+
+
+## Putting it together
+
+The complete pipeline for a document with no shares:
+
+    import PrettyExpressive as P
+    import PrettyExpressive.Builder as B
+
+    cf : P.CostFactory P.DefaultCostTuple
+    cf =
+        P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+    doc : P.Doc P.DefaultCostTuple
+    doc =
+        P.text "hello"
+            |> P.concat P.nl
+            |> P.concat (P.text "world")
+            |> P.group
+
+    result : Maybe String
+    result =
+        P.prettyFormat cf (B.return doc)
+    -- Just "hello world"   (at page width 80, the `group` chose the flat form)
+
+
+## A note on stack safety
+
+The resolver unrolls left-leaning `DocConcat` chains iteratively, so
+documents built via `Array.foldl P.concat` (or any other pattern that
+produces a long left-leaning tree) render without overflowing the JS
+call stack regardless of array length. You don't need to balance
+concat trees by hand for stack safety — build them in whatever shape
+is most convenient for construction.
+
 
 # Sharing sub-documents
 
@@ -250,6 +287,43 @@ page, the broken version if it doesn't.  You would rarely call flatten
 directly. The main case where you would is `flattenAlignedConcat` and `hcat`,
 where the left operand is explicitly flattened to guarantee it stays on
 one line before being aligned-concatenated with the right operand.
+
+## Pareto-optimal measures
+
+At every `(c, i)` position, the resolver tracks not one layout but the
+set of *Pareto-optimal* candidates — layouts that aren't dominated by
+some other layout in the same set. A layout `m1` dominates `m2` when
+`m1.last <= m2.last` and `m1.cost <= m2.cost` and they aren't equal:
+`m1` ends no further right *and* costs no more *and* differs somewhere.
+Dominated candidates are dropped because anything that follows can be
+combined with the better one to produce a strictly better full layout.
+
+Keeping the full Pareto frontier is what lets `choice`/`group` defer the
+flat-vs-broken decision until the surrounding context narrows it down —
+the same sub-document can contribute a "cheap, ends far right" candidate
+*and* a "more expensive, ends short" candidate, and the eventual best
+overall layout draws one of each from several places.
+
+The frontier size is bounded by the page width (at most one candidate
+per `last` column), so the renderer's per-node work is polynomial in
+the document size and page width.
+
+## Tainted measures
+
+When the resolver reaches a position where `c` or `i` exceeds
+`CostFactory.limit` (the *computation width*, defaulting to
+`1.2 * pageWidth`), it stops tracking the full Pareto frontier and
+collapses to a single representative measure wrapped in a `Tainted`
+constructor. The output is still valid and renderable; the printer just
+gave up on searching for the *optimal* layout past that point, settling
+for *a* working one.
+
+Practically: most documents never hit the limit and tainted output
+never happens. Very wide documents (e.g. a 4000-character string
+literal that genuinely cannot fit on the page) may produce tainted
+output; the `isTainted` field on the result tells you when this
+happened. Raising `computationWidth` pushes the threshold out at the
+cost of more search work.
 
 
 # The CostFactory
@@ -1184,14 +1258,25 @@ concat d1 d2 =
             DocConcat { a = d1, b = d2, nlCnt = nlCntOf d1 + nlCntOf d2 }
 
 
-{-| Concatenate an array of documents. This is a helper function
-to avoid having to call `concat` many times.
+{-| Concatenate an array of documents in left-to-right order.
 
-    concat_array [ a, b, c, d ]
-        == concat (concat (concat a b) c) d
+A handy shorthand when you have an array of docs to glue together
+without any separator. Left-folds via `concat`, so for `[a, b, c, d]`
+the result is structurally `concat (concat (concat a b) c) d` — but
+since `concat` is associative the rendered output is the same as any
+other concatenation order.
 
-    which renders the same as
-           concat a (concat b (concat c d))
+    concat_array [ P.text "foo", P.text "bar", P.text "baz" ]
+    -- renders as "foobarbaz"
+
+For separator-delimited concatenation use `foldDoc` directly:
+
+    items =
+        [ P.text "x", P.text "y", P.text "z" ]
+
+    P.foldDoc (\a b -> P.concat a (P.concat (P.text ", ") b)) items
+    -- renders as "x, y, z"
+
 -}
 concat_array : Array (Doc cost) -> Doc cost
 concat_array docs =
@@ -1437,6 +1522,15 @@ share d =
 {-| Replace all newlines in a document with their "flat" alternative.
     That is, convert the document to a one-line version.
 
+**Most callers use `group` rather than calling `flatten` directly.**
+`group d` (= `choice d (flatten d)`) lets the printer pick between the
+original and the flattened form based on what fits, which is almost
+always what you want. Direct use of `flatten` is for the rare case
+where you want to *force* a sub-document onto one line regardless of
+context — `flattenAlignedConcat` and `hcat` are the canonical examples.
+See "Terminology > flattening" in the module header for the wider
+picture.
+
 The mapping for each newline variant is:
 
   - `nl`               -> `text " "`   (was `DocNewline (Just " ")`)
@@ -1594,6 +1688,15 @@ core idiom of most pretty printers.
 Because `choice` drops `failDoc` branches, if `flatten d` fails (e.g. because
 `d` contains a `hardNl`) then `group d` is equivalent to `d` alone.
 
+A small example. With a wide page, `nl` flattens to a space and the whole
+group renders on one line; with a narrow page, the soft newline breaks
+and the group renders on two lines:
+
+    d = group (P.text "foo" |> P.concat P.nl |> P.concat (P.text "bar"))
+
+    -- page width 80 → "foo bar"
+    -- page width  5 → "foo\nbar"
+
 -}
 group : Doc cost -> Doc cost
 group d =
@@ -1606,6 +1709,15 @@ where `a` ends.
 Equivalent to `concat a (align b)`. Also known as *box concatenation* -- `b`
 is treated as a rigid box whose left edge is pinned to `a`'s end column.
 
+    -- `b` is anchored to column 8 (end of "Languages") and its
+    -- internal newlines indent back to that column:
+    alignedConcat (P.text "Languages: ")
+        (P.vcat [ P.text "Gren", P.text "Elm", P.text "Haskell" ])
+
+    -- Languages: Gren
+    --            Elm
+    --            Haskell
+
 -}
 alignedConcat : Doc cost -> Doc cost -> Doc cost
 alignedConcat d1 d2 =
@@ -1616,6 +1728,10 @@ alignedConcat d1 d2 =
 
 Equivalent to `concat a (concat hardNl b)`. Used by `vcat` to stack
 documents vertically.
+
+    hardNlConcat (P.text "first") (P.text "second")
+    -- first
+    -- second
 
 -}
 hardNlConcat : Doc cost -> Doc cost -> Doc cost
@@ -1630,6 +1746,12 @@ Equivalent to `alignedConcat (flatten a) b`. Useful when you want aligned
 multiple lines -- if `flatten a` fails, the whole expression fails and a
 surrounding `choice` can select an alternative layout.
 
+    -- Force the label onto one line, then anchor the value beside it:
+    flattenAlignedConcat
+        (P.text "type" |> P.concat P.nl |> P.concat (P.text "alias:"))
+        (P.text "Doc cost")
+    -- type alias: Doc cost
+
 -}
 flattenAlignedConcat : Doc cost -> Doc cost -> Doc cost
 flattenAlignedConcat d1 d2 =
@@ -1640,6 +1762,11 @@ flattenAlignedConcat d1 d2 =
 
 The fold is left-associative: `foldDoc f [a, b, c]` is `f (f a b) c`.
 Returns `empty` for an empty array.
+
+    -- Comma-separated list:
+    foldDoc (\a b -> P.concat a (P.concat (P.text ", ") b))
+        [ P.text "x", P.text "y", P.text "z" ]
+    -- x, y, z
 
 -}
 foldDoc : (Doc cost -> Doc cost -> Doc cost) -> Array (Doc cost) -> Doc cost
@@ -1657,6 +1784,15 @@ foldDoc f ds =
 `vcat [a, b, c]` is equivalent to `hardNlConcat a (hardNlConcat b c)`.
 Returns `empty` for an empty array.
 
+    vcat
+        [ P.text "module Foo exposing (..)"
+        , P.text ""
+        , P.text "import Bar"
+        ]
+    -- module Foo exposing (..)
+    --
+    -- import Bar
+
 -}
 vcat : Array (Doc cost) -> Doc cost
 vcat =
@@ -1671,6 +1807,16 @@ operand flattened first. If any left operand fails to flatten, the
 surrounding `choice` can select an alternative.
 
 Returns `empty` for an empty array.
+
+    -- Each prefix is flattened so the next piece can be anchored to a
+    -- known column. Useful for left-to-right tabular text:
+    hcat
+        [ P.text "ok: "
+        , P.vcat [ P.text "line1", P.text "line2" ]
+        , P.text " <end>"
+        ]
+    -- ok: line1
+    --     line2 <end>
 
 -}
 hcat : Array (Doc cost) -> Doc cost
@@ -2710,7 +2856,17 @@ prettyFormat cf d =
         |> Maybe.map (\{ string = string } -> string)
 
 
-{-| Like `prettyFormat`, but printing begins at column `initC`. -}
+{-| Like `prettyFormat`, but printing begins at column `initC`.
+
+Use this when the rendered output will be placed after content that is
+already `initC` columns wide — for example, when the document follows
+a label or prompt on the same line and you want subsequent line breaks
+to consider that prefix.
+
+    P.prettyFormatAt cf 8 (B.return doc)
+    -- renders as if the doc started at column 8 (after "Output: ").
+
+-}
 prettyFormatAt : CostFactory cost -> Int -> Builder (Doc cost) -> Maybe String
 prettyFormatAt cf initC d =
     prettyFormatInfoAt cf initC d
@@ -2724,6 +2880,24 @@ marker at the page width, and the `isTainted` flag and cost of the chosen
 layout. The exact format is determined by `CostFactory.debugFormat`; the
 default implementation is `makeDebugFormat`.
 
+With `defaultCostFactory` at page width 10, rendering `Hello!\nWorld`
+produces:
+
+    1234567890
+    Hello!    |
+    World     |
+
+    is_tainted: false
+    cost: (0 0 1)
+
+The first line is the modulo-10 column ruler. Each rendered line is
+padded to the page width and capped with `|`; lines that overflow
+have the marker inserted at the overflow column with the excess to
+its right. The cost-line format depends on the cost type (here
+`DefaultCostTuple = { badness, columnOverflow, height }`).
+
+See `makeDebugFormat` for the authoritative format definition.
+
 Returns `Nothing` if the document fails to render.
 
 -}
@@ -2732,7 +2906,13 @@ prettyFormatDebug cf d =
     prettyFormatDebugAt cf 0 d
 
 
-{-| Like `prettyFormatDebug`, but printing begins at column `initC`. -}
+{-| Like `prettyFormatDebug`, but printing begins at column `initC`.
+
+Use this when the rendered output is being shown alongside content
+that's already `initC` columns wide and you want the debug ruler to
+reflect that starting position.
+
+-}
 prettyFormatDebugAt : CostFactory cost -> Int -> Builder (Doc cost) -> Maybe String
 prettyFormatDebugAt cf initC d =
     prettyFormatInfoAt cf initC d
