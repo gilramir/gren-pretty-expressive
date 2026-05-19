@@ -13,12 +13,62 @@ module PrettyExpressive.Builder exposing
 {-| A small state-passing monad used to thread a fresh-id counter through
 document construction.
 
-The Builder is only needed when a document contains a shared sub-tree (see
-`PrettyExpressive.share`). The renderer's memoization cache keys on the
-share id, so each `share` call must produce a node with a unique id.
+The Builder is only needed when a document contains a shared sub-tree
+(see `PrettyExpressive.share`). The renderer's memoization cache keys
+on the share id, so each `share` call must produce a node with a unique
+id. The Builder runs sequentially through your construction code,
+handing out a different id at every `share` call.
 
 For documents without sharing, callers can use `return` to lift a pure
-`Doc cost` value into a `Builder (Doc cost)` at the entry-point boundary.
+`Doc cost` value into a `Builder (Doc cost)` at the entry-point
+boundary.
+
+
+## Typical usage
+
+**A document with no sharing:** just lift it at the rendering boundary.
+
+    import PrettyExpressive as P
+    import PrettyExpressive.Builder as B
+
+    cf =
+        P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
+
+    helloWorld : Maybe String
+    helloWorld =
+        P.prettyFormat cf
+            (B.return (P.concat (P.text "hello") (P.text " world")))
+
+**A document with one shared sub-doc:** bind the share inside the
+Builder, then build the rest of the doc around it.
+
+    fancyExit : Maybe String
+    fancyExit =
+        P.prettyFormat cf
+            (P.share (P.text "exit();")
+                |> B.map
+                    (\exitD ->
+                        P.choice
+                            (P.concat P.space exitD)
+                            (P.nest 4 (P.concat P.nl exitD))
+                    )
+            )
+
+**Multiple shared sub-docs:** use `andThen` to sequence the share
+allocations, then `map` (or a final `andThen`) to assemble the result.
+
+    twoShared : B.Builder (P.Doc P.DefaultCostTuple)
+    twoShared =
+        P.share (P.text "open();")
+            |> B.andThen
+                (\openD ->
+                    P.share (P.text "close();")
+                        |> B.map
+                            (\closeD ->
+                                P.vcat [ openD, P.text "body();", closeD ]
+                            )
+                )
+
 
 @docs Builder
 @docs State
@@ -36,9 +86,27 @@ For documents without sharing, callers can use `return` to lift a pure
 -}
 
 
-{-| Internal state carried through a `Builder`. The only field is the next
-share id to hand out. Exposed (as an opaque alias) so callers can plumb the
-state through nested runs if needed.
+{-| Internal state carried through a `Builder`. The only field is the
+next share id to hand out. Exposed (as an opaque alias) so callers can
+plumb the state through nested runs if needed.
+
+Most callers don't construct or inspect `State` directly — `run` and
+the rendering entry points handle it transparently. Reach for `State`
+only when you want to chain `runWith` calls so two otherwise-
+independent Builders share a single id namespace:
+
+    import PrettyExpressive.Builder as B
+
+    let
+        firstResult =
+            B.runWith B.freshState firstBuilder
+
+        secondResult =
+            B.runWith firstResult.state secondBuilder
+    in
+    -- firstResult.value and secondResult.value use disjoint share ids.
+    ...
+
 -}
 type alias State =
     { nextId : Int
@@ -46,19 +114,59 @@ type alias State =
 
 
 {-| Initial state with `nextId = 0`.
+
+Most callers don't reference this — `run` defaults to it, and
+`prettyFormat` runs the supplied Builder against a fresh state
+internally. Pass it explicitly to `runWith` only when you want to
+start a Builder run from a known-empty id namespace as the *first*
+step of a longer chain:
+
+    let
+        r =
+            B.runWith B.freshState builder
+    in
+    ...
+
 -}
 freshState : State
 freshState =
     { nextId = 0 }
 
 
-{-| A computation that produces an `a` while threading the id-counter state.
+{-| A computation that produces an `a` while threading the id-counter
+state.
+
+You rarely write the type explicitly — `B.return`, `P.share`, and the
+combinators on this module return `Builder a` values that compose with
+`|>`. A signature you might write at a top-level binding:
+
+    docBuilder : B.Builder (P.Doc P.DefaultCostTuple)
+    docBuilder =
+        B.return (P.text "no sharing needed here")
+
 -}
 type Builder a
     = Builder (State -> { state : State, value : a })
 
 
-{-| Lift a pure value into a `Builder`. The state is passed through unchanged.
+{-| Lift a pure value into a `Builder`. The state is passed through
+unchanged.
+
+Most often used at the entry to `prettyFormat` when the document
+contains no shares:
+
+    P.prettyFormat cf (B.return (P.text "plain text"))
+
+Also handy as the seed of a `B.andThen` chain when the first step
+contributes a non-shared value:
+
+    B.return (P.text "prefix: ")
+        |> B.andThen
+            (\prefix ->
+                P.share bigSubDoc
+                    |> B.map (\shared -> P.concat prefix shared)
+            )
+
 -}
 return : a -> Builder a
 return v =
@@ -66,6 +174,19 @@ return v =
 
 
 {-| Transform the value inside a `Builder`. State is threaded through.
+
+The common case is wrapping a shared sub-doc in some surrounding
+structure after the share is allocated:
+
+    P.share (P.text "fn();")
+        |> B.map
+            (\fnD ->
+                P.concat (P.text "if (cond) ") fnD
+            )
+
+If you need to allocate *another* share inside the wrapping, use
+`andThen` instead — `map` cannot allocate fresh ids in its callback.
+
 -}
 map : (a -> b) -> Builder a -> Builder b
 map f (Builder ba) =
@@ -79,8 +200,26 @@ map f (Builder ba) =
         )
 
 
-{-| Sequence two `Builder`s: run the first, feed its value into `f`, run the
-resulting builder. The id counter advances through both.
+{-| Sequence two `Builder`s: run the first, feed its value into `f`,
+run the resulting builder. The id counter advances through both.
+
+The canonical use case is two `share` allocations whose results both
+feed into the final document:
+
+    P.share leftSubDoc
+        |> B.andThen
+            (\sharedLeft ->
+                P.share rightSubDoc
+                    |> B.map
+                        (\sharedRight ->
+                            P.concat sharedLeft sharedRight
+                        )
+            )
+
+Use `B.andThen` whenever the next step needs to allocate a fresh id
+(via `share` or `withFreshId`); use `B.map` when the next step is pure
+Doc-shape manipulation that doesn't touch the id counter.
+
 -}
 andThen : (a -> Builder b) -> Builder a -> Builder b
 andThen f (Builder ba) =
@@ -97,9 +236,22 @@ andThen f (Builder ba) =
         )
 
 
-{-| Allocate a fresh id and pass it to `f` to build the resulting value.
-This is the only way to advance the id counter, and is used internally by
-`PrettyExpressive.share`.
+{-| Allocate a fresh id and pass it to `f` to build the resulting
+value. This is the only way to advance the id counter, and is used
+internally by `PrettyExpressive.share`:
+
+    share : Doc cost -> Builder (Doc cost)
+    share d =
+        Builder.withFreshId
+            (\id_ ->
+                DocShared { id = id_, doc = d, nlCnt = nlCntOf d }
+            )
+
+External callers rarely need `withFreshId` directly — `share` is the
+intended user-facing API. Reach for `withFreshId` only when adding a
+custom node type that participates in the memo cache and needs its own
+unique id.
+
 -}
 withFreshId : (Int -> a) -> Builder a
 withFreshId f =
@@ -111,17 +263,54 @@ withFreshId f =
         )
 
 
-{-| Run a `Builder` starting from `freshState`, returning the final value.
-The final state is discarded.
+{-| Run a `Builder` starting from `freshState`, returning the final
+value. The final state is discarded.
+
+In normal use, you pass a `Builder` directly to a rendering entry
+point (`prettyFormat`, `prettyFormatInfo`, etc.) which calls `run`
+internally. You only reach for `run` yourself when you need the raw
+`Doc cost` value outside the rendering pipeline — typically for
+structural inspection in tests, or for serializing the tree via
+`PrettyExpressive.Json.docToJson`:
+
+    import PrettyExpressive as P
+    import PrettyExpressive.Builder as B
+    import PrettyExpressive.Json as J
+
+    debugDump : String
+    debugDump =
+        J.docToJson
+            (B.run
+                (P.share (P.text "shared")
+                    |> B.map (\s -> P.concat s s)
+                )
+            )
+
 -}
 run : Builder a -> a
 run b =
     (runWith freshState b).value
 
 
-{-| Run a `Builder` starting from a caller-supplied `State`, returning both
-the final value and the advanced state. Useful when composing multiple
-independent builds that should share an id namespace.
+{-| Run a `Builder` starting from a caller-supplied `State`, returning
+both the final value and the advanced state. Useful when composing
+multiple independent builds that should share an id namespace.
+
+    let
+        first =
+            B.runWith B.freshState firstBuilder
+
+        second =
+            B.runWith first.state secondBuilder
+    in
+    -- first.value and second.value use disjoint share ids, so they
+    -- can safely be combined into a single document and rendered.
+    P.prettyFormat cf
+        (B.return (P.concat first.value second.value))
+
+The common case (one Builder, no manual state threading) is `run`,
+which defaults to `freshState` and discards the final state.
+
 -}
 runWith : State -> Builder a -> { state : State, value : a }
 runWith state (Builder b) =
