@@ -233,8 +233,12 @@ input degenerates to `P.align (P.concat a b)`; empty input is `P.empty`.
 - **`Builder.return` is required at the entry point.** Forgetting it is a
   type error: entry points take `B.Builder (P.Doc cost)`, not
   `P.Doc cost`.
-- **Sharing is only useful for multi-reference subtrees.** Wrapping a
-  one-use sub-document with `share` adds a memo lookup with no benefit.
+- **Sharing trivial leaves rarely pays off.** Wrapping a leaf like
+  `P.text "x"` in `share` adds memo-cache overhead with no benefit.
+  Sharing pays off for non-trivial sub-docs — either ones referenced
+  from multiple positions in the tree, **or** single-reference sub-docs
+  that sit immediately after a newline (see "Pattern: share post-newline
+  sub-docs" above).
 - **Don't construct `DocContext`, `DocEvaled`, or `DocBlank` directly.**
   These are internal renderer nodes used by `twoColumns`; user-facing
   code should never need them. `flatten` of these returns `failDoc`.
@@ -254,6 +258,13 @@ input degenerates to `P.align (P.concat a b)`; empty input is `P.empty`.
 - **Choice ordering:** when two branches have equal cost, `choice a b`
   prefers `a`. The renderer evaluates the higher-newline branch first
   (heuristic) but tie-breaking still favours the first argument.
+- **No stack-depth limit on `DocConcat` chains.** The resolver unrolls
+  left-leaning `DocConcat` chains iteratively, so docs built via
+  `Array.foldl P.concat` (or any other pattern producing a deep
+  left-leaning tree) render without overflowing the JS call stack
+  regardless of array length. You don't need to balance concat trees
+  for stack safety — only build them in whatever shape is most
+  convenient for construction.
 
 ## Cost model (default)
 
