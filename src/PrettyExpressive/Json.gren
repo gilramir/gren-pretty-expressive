@@ -5,6 +5,7 @@ module PrettyExpressive.Json exposing (docToJson)
 @docs docToJson
 -}
 
+import Json.Encode as Json
 import PrettyExpressive as P
 
 
@@ -26,120 +27,109 @@ Each `Doc` variant is encoded as a JSON object with a `"type"` field:
   - `DocContext`    → `{"type":"context"}` (internal renderer node; function not inspectable)
   - `DocEvaled`     → `{"type":"evaled"}` (internal renderer node; measures not inspectable)
 
-String values are JSON-escaped: `\` and `"` are escaped, and the control
-characters `\n`, `\r`, and `\t` are replaced with their JSON escape sequences.
-
 -}
 docToJson : P.Doc cost -> String
 docToJson doc =
-    go doc
+    Json.encode 0 (docToValue doc)
 
 
-go : P.Doc cost -> String
-go doc =
+docToValue : P.Doc cost -> Json.Value
+docToValue doc =
     when doc is
         P.DocFail ->
-            "{\"type\":\"fail\"}"
+            Json.object
+                [ { key = "type", value = Json.string "fail" } ]
 
         P.DocText { string = s, width = w } ->
-            "{\"type\":\"text\",\"string\":"
-                ++ jsonString s
-                ++ ",\"width\":"
-                ++ String.fromInt w
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "text" }
+                , { key = "string", value = Json.string s }
+                , { key = "width", value = Json.int w }
+                ]
 
         P.DocNewline Nothing ->
-            "{\"type\":\"newline\",\"flatForm\":null}"
+            Json.object
+                [ { key = "type", value = Json.string "newline" }
+                , { key = "flatForm", value = Json.null }
+                ]
 
         P.DocNewline (Just s) ->
-            "{\"type\":\"newline\",\"flatForm\":"
-                ++ jsonString s
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "newline" }
+                , { key = "flatForm", value = Json.string s }
+                ]
 
         P.DocBlank n ->
-            "{\"type\":\"blank\",\"width\":"
-                ++ String.fromInt n
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "blank" }
+                , { key = "width", value = Json.int n }
+                ]
 
         P.DocConcat { a = d1, b = d2 } ->
-            "{\"type\":\"concat\",\"a\":"
-                ++ go d1
-                ++ ",\"b\":"
-                ++ go d2
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "concat" }
+                , { key = "a", value = docToValue d1 }
+                , { key = "b", value = docToValue d2 }
+                ]
 
         P.DocChoice { a = d1, b = d2 } ->
-            "{\"type\":\"choice\",\"a\":"
-                ++ go d1
-                ++ ",\"b\":"
-                ++ go d2
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "choice" }
+                , { key = "a", value = docToValue d1 }
+                , { key = "b", value = docToValue d2 }
+                ]
 
         P.DocNest { indent = n, doc = inner } ->
-            "{\"type\":\"nest\",\"indent\":"
-                ++ String.fromInt n
-                ++ ",\"doc\":"
-                ++ go inner
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "nest" }
+                , { key = "indent", value = Json.int n }
+                , { key = "doc", value = docToValue inner }
+                ]
 
         P.DocAlign inner ->
-            "{\"type\":\"align\",\"doc\":"
-                ++ go inner
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "align" }
+                , { key = "doc", value = docToValue inner }
+                ]
 
         P.DocReset inner ->
-            "{\"type\":\"reset\",\"doc\":"
-                ++ go inner
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "reset" }
+                , { key = "doc", value = docToValue inner }
+                ]
 
         P.DocAddCost { cost = _, doc = inner } ->
-            "{\"type\":\"addCost\",\"doc\":"
-                ++ go inner
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "addCost" }
+                , { key = "doc", value = docToValue inner }
+                ]
 
         P.DocContext _ ->
-            "{\"type\":\"context\"}"
+            Json.object
+                [ { key = "type", value = Json.string "context" } ]
 
         P.DocEvaled _ ->
-            "{\"type\":\"evaled\"}"
+            Json.object
+                [ { key = "type", value = Json.string "evaled" } ]
 
         P.DocTwoColumns pairs ->
-            "{\"type\":\"twoColumns\",\"rows\":"
-                ++ jsonArray (Array.map pairToJson pairs)
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "twoColumns" }
+                , { key = "rows", value = Json.array pairToValue pairs }
+                ]
 
         P.DocShared { id, doc = inner, nlCnt } ->
-            "{\"type\":\"shared\",\"id\":"
-                ++ String.fromInt id
-                ++ ",\"nlCnt\":"
-                ++ String.fromInt nlCnt
-                ++ ",\"doc\":"
-                ++ go inner
-                ++ "}"
+            Json.object
+                [ { key = "type", value = Json.string "shared" }
+                , { key = "id", value = Json.int id }
+                , { key = "nlCnt", value = Json.int nlCnt }
+                , { key = "doc", value = docToValue inner }
+                ]
 
 
-pairToJson : P.DocPair cost -> String
-pairToJson { a = d1, b = d2 } =
-    "{\"a\":"
-        ++ go d1
-        ++ ",\"b\":"
-        ++ go d2
-        ++ "}"
-
-
-jsonArray : Array String -> String
-jsonArray items =
-    "[" ++ String.join "," items ++ "]"
-
-
-jsonString : String -> String
-jsonString s =
-    "\""
-        ++ (s
-                |> String.split "\\" |> String.join "\\\\"
-                |> String.split "\"" |> String.join "\\\""
-                |> String.split "\n" |> String.join "\\n"
-                |> String.split "\r" |> String.join "\\r"
-                |> String.split "\t" |> String.join "\\t"
-           )
-        ++ "\""
+pairToValue : P.DocPair cost -> Json.Value
+pairToValue { a = d1, b = d2 } =
+    Json.object
+        [ { key = "a", value = docToValue d1 }
+        , { key = "b", value = docToValue d2 }
+        ]
