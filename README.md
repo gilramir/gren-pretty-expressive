@@ -22,15 +22,16 @@ rendered into a string with another function.
     cf =
         P.defaultCostFactory { pageWidth = 80, computationWidth = Nothing }
 
-    -- Build a document for the Gren declaration `pi = 3.14`.
-    -- `group` lets the renderer pick the flat form `pi = 3.14` when
-    -- it fits, and otherwise break to:
-    --     pi =
+    -- Build a document for the Gren declaration `this_is_pi = 3.14`.
+    -- `group` lets the renderer pick the flat form (one line)
+    -- `this_is_pi = 3.14` when it fits, and otherwise break to the
+    -- multi-line form:
+    --     this_is_pi =
     --         3.14
     document : P.Doc cost
     document =
         P.concat
-            (P.text "pi =")
+            (P.text "this_is_pi =")
             (P.nest 4 (P.group (P.concat P.nl (P.text "3.14"))))
 
 `group d` desugars to `choice d (flatten d)`, and `flatten` rewrites
@@ -41,7 +42,7 @@ it can redner to the 2-line format, otherwise, it can choose the single-line
 format. The constructed `document` looks like:
 
     DocConcat {
-        a = DocText { string = "pi =", width = 4 },
+        a = DocText { string = "this_is_pi =", width = 12 },
         b = DocNest {
             indent = 4,
             doc = DocChoice {
@@ -56,12 +57,13 @@ format. The constructed `document` looks like:
 
 It is rendered as:
 
-    pi = 3.14
+    this_is_pi = 3.14
 
-but if the renderer needs one more space to fit it nicely on the page, this
-two-line form is chosen:
+However if it goes over the page boundary and if by usiing the
+multi-line form it fits better on the page, the pretty printer
+will choose the multi-line form:
 
-    pi =
+    this_is_pi =
         3.14
 
 ## Sharing sub-documents
